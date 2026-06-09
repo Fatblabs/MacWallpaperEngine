@@ -6,6 +6,7 @@ struct DualHandleRangeSlider: View {
 
     let bounds: ClosedRange<Double>
     var minimumDistance: Double = 0.5
+    var maximumDistance: Double?
 
     var body: some View {
         GeometryReader { proxy in
@@ -31,7 +32,11 @@ struct DualHandleRangeSlider: View {
                         DragGesture(minimumDistance: 0)
                             .onChanged { value in
                                 let proposed = valueFor(x: value.location.x, width: width)
-                                lowerValue = min(max(bounds.lowerBound, proposed), upperValue - minimumDistance)
+                                let maxLowerFromLength = maximumDistance.map { upperValue - $0 } ?? bounds.lowerBound
+                                lowerValue = min(
+                                    max(bounds.lowerBound, max(maxLowerFromLength, proposed)),
+                                    upperValue - minimumDistance
+                                )
                             }
                     )
 
@@ -41,7 +46,11 @@ struct DualHandleRangeSlider: View {
                         DragGesture(minimumDistance: 0)
                             .onChanged { value in
                                 let proposed = valueFor(x: value.location.x, width: width)
-                                upperValue = max(min(bounds.upperBound, proposed), lowerValue + minimumDistance)
+                                let maxUpperFromLength = maximumDistance.map { lowerValue + $0 } ?? bounds.upperBound
+                                upperValue = max(
+                                    min(bounds.upperBound, min(maxUpperFromLength, proposed)),
+                                    lowerValue + minimumDistance
+                                )
                             }
                     )
             }

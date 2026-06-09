@@ -23,6 +23,22 @@ struct WallpaperEditorConfigurationTests {
     }
 
     @Test
+    func performanceSnippetCapsLongSelectionsToSixtySeconds() {
+        let trim = VideoTrimConfiguration(startSeconds: 10, endSeconds: 110).performanceSnippet(forDuration: 180)
+
+        #expect(trim.startSeconds == 10)
+        #expect(trim.endSeconds == 70)
+    }
+
+    @Test
+    func performanceSnippetExpandsTinySelectionsTowardThirtySecondsWhenPossible() {
+        let trim = VideoTrimConfiguration(startSeconds: 15, endSeconds: 16).performanceSnippet(forDuration: 90)
+
+        #expect(trim.startSeconds == 15)
+        #expect(trim.endSeconds == 45)
+    }
+
+    @Test
     func lightDarkThemeSyncChoosesConfiguredVariant() {
         let defaultID = UUID()
         let lightID = UUID()
@@ -73,5 +89,108 @@ struct WallpaperEditorConfigurationTests {
 
         configuration.playbackSpeed = 0.01
         #expect(configuration.clampedPlaybackSpeed == 0.25)
+    }
+
+    @Test
+    func playlistMovePreservesOrderAndClampsCurrentIndex() {
+        let first = UUID()
+        let second = UUID()
+        let third = UUID()
+        var playlist = PlaylistConfiguration(assetIDs: [first, second, third], currentIndex: 5)
+
+        playlist.move(from: IndexSet(integer: 0), to: 3)
+
+        #expect(playlist.assetIDs == [second, third, first])
+        #expect(playlist.currentIndex == 2)
+    }
+
+    @Test
+    func invisibleOrEmptyWidgetsDoNotEmitVisibleContent() {
+        var clock = DesktopWidgetConfiguration.clock()
+        clock.clock.showTime = false
+        clock.clock.showDate = false
+        #expect(clock.emitsVisibleContent == false)
+
+        clock.clock.showTime = true
+        #expect(clock.emitsVisibleContent)
+
+        clock.isVisible = false
+        #expect(clock.emitsVisibleContent == false)
+    }
+
+    @Test
+    func editorDecodesLegacyPayloadWithDefaultSchemaAdditions() throws {
+        let legacyJSON = """
+        {
+          "playbackSpeed": 1.0
+        }
+        """.data(using: .utf8)!
+
+        let configuration = try JSONDecoder().decode(WallpaperEditorConfiguration.self, from: legacyJSON)
+
+        #expect(configuration.playbackSpeed == 1)
+        #expect(configuration.widgets.isEmpty)
+        #expect(configuration.playlist.assetIDs.isEmpty)
+    }
+
+    @Test
+    func removingWallpaperCleansPlaylistAndThemeReferences() {
+        let removedID = UUID()
+        let survivorID = UUID()
+        var configuration = WallpaperEditorConfiguration.default
+        configuration.playlist = PlaylistConfiguration(assetIDs: [removedID, survivorID], currentIndex: 4)
+        configuration.themeSync = ThemeSyncConfiguration(
+            mode: .systemAppearance,
+            lightAssetID: removedID,
+            darkAssetID: survivorID,
+            dayAssetID: removedID,
+            nightAssetID: survivorID
+        )
+
+        let cleaned = WallpaperReferenceCleanup.cleaned(configuration: configuration, removing: removedID)
+
+        #expect(cleaned.playlist.assetIDs == [survivorID])
+        #expect(cleaned.playlist.currentIndex == 0)
+        #expect(cleaned.themeSync.lightAssetID == nil)
+        #expect(cleaned.themeSync.darkAssetID == survivorID)
+        #expect(cleaned.themeSync.dayAssetID == nil)
+        #expect(cleaned.themeSync.nightAssetID == survivorID)
+    }
+
+    @Test
+    func persistentWallpaperSnapshotRoundTripsDisplayAssignments() throws {
+        let assetID = UUID()
+        let snapshot = PersistentWallpaperSnapshot(
+            updatedAt: Date(timeIntervalSince1970: 1_234),
+            activeAssetIDs: [assetID],
+            assets: [
+                WallpaperAssetRestoreMetadata(
+                    id: assetID,
+                    displayName: "Ocean",
+                    originalFilename: "ocean.mov",
+                    lastKnownPath: "/Users/example/ocean.mov",
+                    duration: 42,
+                    pixelWidth: 3840,
+                    pixelHeight: 2160,
+                    codecSummary: "hvc1",
+                    posterFrameFilename: "poster.png",
+                    editorFingerprint: "abc"
+                )
+            ],
+            displayAssignments: [
+                WallpaperDisplayAssignmentSnapshot(
+                    screenID: "100",
+                    assetID: assetID,
+                    layoutModeRawValue: "fill"
+                )
+            ]
+        )
+
+        let data = try JSONEncoder().encode(snapshot)
+        let decoded = try JSONDecoder().decode(PersistentWallpaperSnapshot.self, from: data)
+
+        #expect(decoded == snapshot)
+        #expect(decoded.assignedAssetID(for: "100") == assetID)
+        #expect(decoded.assignedAssetID(for: "missing") == nil)
     }
 }

@@ -41,10 +41,12 @@ final class AppState: ObservableObject {
     private var scheduleTimer: Timer?
     private var latestAssets: [WallpaperAssetRecord] = []
     private var latestProfiles: [DisplayProfileRecord] = []
+    private var restoredSnapshot: PersistentWallpaperSnapshot?
     private let policyDefaultsKey = "MacWallpaperEngine.playbackPolicy"
     private let widgetDefaultsKey = "MacWallpaperEngine.widgetConfiguration"
 
     init() {
+        restoredSnapshot = WallpaperStateCache.load()
         loadPolicy()
         loadWidgetConfiguration()
     }
@@ -53,7 +55,7 @@ final class AppState: ObservableObject {
         guard !didStart else { return }
         didStart = true
 
-        wallpaperCoordinator.start()
+        wallpaperCoordinator.prepareForImmediateDisplay()
         wallpaperCoordinator.setWidgetConfiguration(widgetConfiguration)
         scheduleTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
             Task { @MainActor in
@@ -124,6 +126,7 @@ final class AppState: ObservableObject {
         start()
         latestAssets = assets
         latestProfiles = profiles
+        WallpaperStateCache.save(assets: assets, profiles: profiles)
 
         let configurations = WallpaperDisplay.displays().compactMap { display -> WallpaperDisplayConfiguration? in
             let profile = profiles.first { $0.screenID == display.idString }
@@ -136,19 +139,22 @@ final class AppState: ObservableObject {
                     fileURL: nil,
                     assetDuration: 0,
                     layoutMode: .fill,
-                    editorConfiguration: .default
+                    editorConfiguration: .default,
+                    playlistItems: []
                 )
             }
 
             do {
                 let url = try asset.resolvedURL()
+                let playlistItems = playlistItems(for: asset, assets: assets)
                 return WallpaperDisplayConfiguration(
                     display: display,
                     assetID: asset.id,
                     fileURL: url,
                     assetDuration: asset.duration,
                     layoutMode: profile?.layoutMode ?? .fill,
-                    editorConfiguration: asset.editorConfiguration
+                    editorConfiguration: asset.editorConfiguration,
+                    playlistItems: playlistItems
                 )
             } catch {
                 return WallpaperDisplayConfiguration(
@@ -157,7 +163,8 @@ final class AppState: ObservableObject {
                     fileURL: nil,
                     assetDuration: asset.duration,
                     layoutMode: profile?.layoutMode ?? .fill,
-                    editorConfiguration: asset.editorConfiguration
+                    editorConfiguration: asset.editorConfiguration,
+                    playlistItems: []
                 )
             }
         }
@@ -262,6 +269,48 @@ final class AppState: ObservableObject {
         }
     }
 
+    func removeWallpaper(
+        _ asset: WallpaperAssetRecord,
+        assets: [WallpaperAssetRecord],
+        profiles: [DisplayProfileRecord],
+        modelContext: ModelContext
+    ) {
+        let removedAssetID = asset.id
+        let removedDisplayName = asset.displayName
+        let removedPosterFrameFilename = asset.posterFrameFilename
+        let remainingAssets = assets.filter { $0.id != removedAssetID }
+        let replacementAssetID = remainingAssets.first?.id
+
+        do {
+            for profile in profiles where profile.assignedAssetID == removedAssetID {
+                profile.assignedAssetID = replacementAssetID
+                profile.updatedAt = Date()
+            }
+
+            for remainingAsset in remainingAssets {
+                let currentConfiguration = remainingAsset.editorConfiguration
+                let cleanedConfiguration = WallpaperReferenceCleanup.cleaned(
+                    configuration: currentConfiguration,
+                    removing: removedAssetID
+                )
+                if cleanedConfiguration != currentConfiguration {
+                    remainingAsset.editorConfiguration = cleanedConfiguration
+                }
+            }
+
+            modelContext.delete(asset)
+            try modelContext.save()
+
+            PosterFrameCache.remove(filename: removedPosterFrameFilename)
+            WallpaperStateCache.save(assets: remainingAssets, profiles: profiles)
+            reconcile(assets: remainingAssets, profiles: profiles)
+            statusMessage = "Removed \(removedDisplayName)"
+            lastErrorMessage = nil
+        } catch {
+            lastErrorMessage = "Wallpaper could not be removed: \(error.localizedDescription)"
+        }
+    }
+
     func setLayout(_ layoutMode: WallpaperLayoutMode, for display: WallpaperDisplay, modelContext: ModelContext) {
         do {
             let screenID = display.idString
@@ -316,6 +365,49 @@ final class AppState: ObservableObject {
         }
     }
 
+    func exportOptimizedSnippet(
+        for asset: WallpaperAssetRecord,
+        assets: [WallpaperAssetRecord],
+        profiles: [DisplayProfileRecord],
+        modelContext: ModelContext
+    ) {
+        Task {
+            do {
+                let sourceURL = try asset.resolvedURL()
+                let configuration = asset.editorConfiguration
+                let outputURL = try await SnippetExporter.exportOptimizedSnippet(
+                    sourceURL: sourceURL,
+                    assetID: asset.id,
+                    sourceDisplayName: asset.displayName,
+                    duration: asset.duration,
+                    trim: configuration.videoTrim
+                )
+
+                let metadata = try LocalVideoImporter.metadata(for: outputURL)
+                var newAsset = WallpaperAsset(
+                    displayName: "\(metadata.displayName) Optimized",
+                    originalFilename: metadata.originalFilename,
+                    bookmarkData: metadata.bookmarkData,
+                    duration: metadata.duration,
+                    pixelWidth: metadata.pixelWidth,
+                    pixelHeight: metadata.pixelHeight,
+                    codecSummary: metadata.codecSummary,
+                    lastKnownPath: metadata.lastKnownPath
+                )
+                newAsset.posterFrameFilename = PosterFrameCache.generatePoster(for: outputURL, assetID: newAsset.id)
+                let record = WallpaperAssetRecord(asset: newAsset)
+                modelContext.insert(record)
+
+                try modelContext.save()
+                statusMessage = "Exported optimized snippet"
+                lastErrorMessage = nil
+                reconcile(assets: [record] + assets, profiles: profiles)
+            } catch {
+                lastErrorMessage = "Snippet export failed: \(error.localizedDescription)"
+            }
+        }
+    }
+
     private func assetForDisplay(
         _ display: WallpaperDisplay,
         profile: DisplayProfileRecord?,
@@ -324,6 +416,11 @@ final class AppState: ObservableObject {
         if let assignedAssetID = profile?.assignedAssetID,
            let assigned = assets.first(where: { $0.id == assignedAssetID }) {
             return resolvedVariant(for: assigned, assets: assets)
+        }
+
+        if let restoredAssetID = restoredSnapshot?.assignedAssetID(for: display.idString),
+           let restoredAsset = assets.first(where: { $0.id == restoredAssetID }) {
+            return resolvedVariant(for: restoredAsset, assets: assets)
         }
 
         guard let first = assets.first else { return nil }
@@ -342,6 +439,26 @@ final class AppState: ObservableObject {
         )
 
         return assets.first(where: { $0.id == variantID }) ?? assigned
+    }
+
+    private func playlistItems(
+        for asset: WallpaperAssetRecord,
+        assets: [WallpaperAssetRecord]
+    ) -> [WallpaperPlaylistItemConfiguration] {
+        let configuration = asset.editorConfiguration
+        let orderedIDs = configuration.playlist.assetIDs.isEmpty ? [asset.id] : configuration.playlist.assetIDs
+        return orderedIDs.compactMap { id in
+            guard let itemAsset = assets.first(where: { $0.id == id }),
+                  let url = try? itemAsset.resolvedURL() else {
+                return nil
+            }
+
+            return WallpaperPlaylistItemConfiguration(
+                id: itemAsset.id,
+                url: url,
+                duration: itemAsset.duration
+            )
+        }
     }
 
     private func currentWallpaperAppearance() -> WallpaperAppearance {

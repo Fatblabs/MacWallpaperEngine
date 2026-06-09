@@ -15,6 +15,13 @@ final class WallpaperCoordinator {
         Array(controllers.keys)
     }
 
+    func prepareForImmediateDisplay() {
+        start()
+        for controller in controllers.values {
+            controller.prepareForImmediateDisplay()
+        }
+    }
+
     func start() {
         let displays = WallpaperDisplay.displays()
         let currentIDs = Set(displays.map(\.id))
@@ -39,6 +46,7 @@ final class WallpaperCoordinator {
             controller.setVideo(
                 url: configuration.fileURL,
                 assetDuration: configuration.assetDuration,
+                playlistItems: configuration.playlistItems,
                 layoutMode: configuration.layoutMode,
                 editorConfiguration: configuration.editorConfiguration
             )
@@ -70,6 +78,7 @@ private final class WallpaperWindowController {
     private let videoView = VideoWallpaperView()
     private var activeURL: URL?
     private var activeDuration: Double = 0
+    private var activePlaylistItems: [WallpaperPlaylistItemConfiguration] = []
     private var activeLayoutMode: WallpaperLayoutMode = .fill
     private var activeEditorConfiguration: WallpaperEditorConfiguration = .default
 
@@ -93,10 +102,16 @@ private final class WallpaperWindowController {
         videoView.setVideo(
             url: nil,
             assetDuration: 0,
+            playlistItems: [],
             layoutMode: .fill,
             editorConfiguration: .default
         )
         window.close()
+    }
+
+    func prepareForImmediateDisplay() {
+        window.orderBack(nil)
+        videoView.prepareForImmediateDisplay()
     }
 
     func update(display: WallpaperDisplay) {
@@ -109,22 +124,26 @@ private final class WallpaperWindowController {
     func setVideo(
         url: URL?,
         assetDuration: Double,
+        playlistItems: [WallpaperPlaylistItemConfiguration],
         layoutMode: WallpaperLayoutMode,
         editorConfiguration: WallpaperEditorConfiguration
     ) {
         guard activeURL != url ||
                 activeDuration != assetDuration ||
+                activePlaylistItems != playlistItems ||
                 activeLayoutMode != layoutMode ||
                 activeEditorConfiguration != editorConfiguration else {
             return
         }
         activeURL = url
         activeDuration = assetDuration
+        activePlaylistItems = playlistItems
         activeLayoutMode = layoutMode
         activeEditorConfiguration = editorConfiguration
         videoView.setVideo(
             url: url,
             assetDuration: assetDuration,
+            playlistItems: playlistItems,
             layoutMode: layoutMode,
             editorConfiguration: editorConfiguration
         )
@@ -161,9 +180,14 @@ private final class WallpaperWindowController {
 private final class VideoWallpaperView: NSView {
     private var queuePlayer: AVQueuePlayer?
     private var looper: AVPlayerLooper?
+    private var playlistItems: [WallpaperPlaylistItemConfiguration] = []
+    private var playlistScopedURLs: [URL] = []
+    private var playlistEndObserver: NSObjectProtocol?
+    private var currentPlaylistIndex = 0
     private var playerLayer: AVPlayerLayer?
     private var placeholderLayer = CATextLayer()
     private var widgetLayer = CATextLayer()
+    private let widgetRuntime = WidgetRuntimeHost()
     private var tintLayer = CALayer()
     private var fogLayer = CAGradientLayer()
     private var cloudLayer = CALayer()
@@ -205,18 +229,27 @@ private final class VideoWallpaperView: NSView {
         cloudLayer.frame = bounds
         foregroundLayer.frame = bounds
         updateCustomTextFrame()
+        updateDataDrivenWidgetFrames()
         updateWidgetFrame()
+    }
+
+    func prepareForImmediateDisplay() {
+        layer?.backgroundColor = NSColor.black.cgColor
+        showPlaceholder(playerLayer == nil)
     }
 
     func setVideo(
         url: URL?,
         assetDuration: Double,
+        playlistItems: [WallpaperPlaylistItemConfiguration],
         layoutMode: WallpaperLayoutMode,
         editorConfiguration: WallpaperEditorConfiguration
     ) {
         stopSecurityScope()
+        removePlaylistObserver()
         self.layoutMode = layoutMode
         self.editorConfiguration = editorConfiguration
+        self.playlistItems = playlistItems
 
         guard let url else {
             queuePlayer?.pause()
@@ -227,6 +260,17 @@ private final class VideoWallpaperView: NSView {
             placeholderLayer.string = "Drop a local video to start"
             showPlaceholder(true)
             updateEditorPresentation()
+            return
+        }
+
+        let playablePlaylistItems = playlistItems.filter { $0.url.isFileURL }
+        if playablePlaylistItems.count > 1 {
+            setPlaylist(
+                playablePlaylistItems,
+                fallbackURL: url,
+                layoutMode: layoutMode,
+                editorConfiguration: editorConfiguration
+            )
             return
         }
 
@@ -261,6 +305,46 @@ private final class VideoWallpaperView: NSView {
         self.layer?.insertSublayer(layer, at: 0)
         showPlaceholder(false)
         updateEditorPresentation()
+        fadeInPlayerLayer(layer)
+        player.playImmediately(atRate: Float(editorConfiguration.clampedPlaybackSpeed))
+    }
+
+    private func setPlaylist(
+        _ items: [WallpaperPlaylistItemConfiguration],
+        fallbackURL: URL,
+        layoutMode: WallpaperLayoutMode,
+        editorConfiguration: WallpaperEditorConfiguration
+    ) {
+        playlistScopedURLs = []
+        for item in items where item.url.startAccessingSecurityScopedResource() {
+            playlistScopedURLs.append(item.url)
+        }
+        securityScopedURL = fallbackURL
+        securityScopeIsActive = false
+
+        currentPlaylistIndex = min(max(0, editorConfiguration.playlist.currentIndex), items.count - 1)
+
+        let player = AVQueuePlayer()
+        player.isMuted = true
+        player.actionAtItemEnd = .advance
+        player.automaticallyWaitsToMinimizeStalling = true
+
+        let layer = AVPlayerLayer(player: player)
+        layer.videoGravity = layoutMode.videoGravity
+        layer.frame = bounds
+        layer.backgroundColor = NSColor.black.cgColor
+
+        playerLayer?.removeFromSuperlayer()
+        queuePlayer = player
+        looper = nil
+        playerLayer = layer
+        self.layer?.insertSublayer(layer, at: 0)
+
+        enqueuePlaylistItems(startingAt: currentPlaylistIndex, minimumQueuedItems: min(3, items.count))
+        observePlaylistAdvancement()
+        showPlaceholder(false)
+        updateEditorPresentation()
+        fadeInPlayerLayer(layer)
         player.playImmediately(atRate: Float(editorConfiguration.clampedPlaybackSpeed))
     }
 
@@ -313,6 +397,8 @@ private final class VideoWallpaperView: NSView {
             NSEvent.removeMonitor(clickEventMonitor)
             self.clickEventMonitor = nil
         }
+        removePlaylistObserver()
+        clearDataDrivenWidgetLayers()
         stopSecurityScope()
     }
 
@@ -402,11 +488,64 @@ private final class VideoWallpaperView: NSView {
         if securityScopeIsActive, let securityScopedURL {
             securityScopedURL.stopAccessingSecurityScopedResource()
         }
+        for url in playlistScopedURLs {
+            url.stopAccessingSecurityScopedResource()
+        }
+        playlistScopedURLs = []
         securityScopedURL = nil
         securityScopeIsActive = false
     }
 
+    private func enqueuePlaylistItems(startingAt startIndex: Int, minimumQueuedItems: Int) {
+        guard let queuePlayer, !playlistItems.isEmpty else { return }
+
+        var queuedCount = queuePlayer.items().count
+        var nextIndex = (startIndex + queuedCount) % playlistItems.count
+
+        while queuedCount < minimumQueuedItems {
+            let current = playlistItems[nextIndex]
+            let following = playlistItems[(nextIndex + 1) % playlistItems.count]
+            let item = PlaylistCompositionFactory.playerItem(
+                currentURL: current.url,
+                nextURL: playlistItems.count > 1 ? following.url : nil,
+                crossfadeDuration: editorConfiguration.playlist.crossfadeDuration
+            )
+            queuePlayer.insert(item, after: nil)
+            queuedCount += 1
+            nextIndex = (nextIndex + 1) % playlistItems.count
+        }
+    }
+
+    private func observePlaylistAdvancement() {
+        removePlaylistObserver()
+        playlistEndObserver = NotificationCenter.default.addObserver(
+            forName: .AVPlayerItemDidPlayToEndTime,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            let isPlayerItemNotification = notification.object is AVPlayerItem
+            Task { @MainActor in
+                guard let self,
+                      isPlayerItemNotification,
+                      self.playlistItems.count > 1 else {
+                    return
+                }
+
+                self.currentPlaylistIndex = (self.currentPlaylistIndex + 1) % max(1, self.playlistItems.count)
+                self.enqueuePlaylistItems(startingAt: self.currentPlaylistIndex, minimumQueuedItems: min(3, self.playlistItems.count))
+            }
+        }
+    }
+
+    private func removePlaylistObserver() {
+        if let playlistEndObserver {
+            NotificationCenter.default.removeObserver(playlistEndObserver)
+            self.playlistEndObserver = nil
+        }
+    }
+
     private func updateWidgetFrame() {
+        guard editorConfiguration.activeWidgets.isEmpty else { return }
         let activeClock = editorConfiguration.layers.showWidgets && editorConfiguration.clockCalendar.isEnabled
         let size = CGSize(width: 300, height: activeClock && editorConfiguration.clockCalendar.showClock && editorConfiguration.clockCalendar.showCalendar ? 108 : 74)
         let inset: CGFloat = 32
@@ -435,13 +574,19 @@ private final class VideoWallpaperView: NSView {
     }
 
     private func updateWidgetText() {
+        if !editorConfiguration.activeWidgets.isEmpty {
+            updateDataDrivenWidgets()
+            return
+        }
+
+        clearDataDrivenWidgetLayers()
         if editorConfiguration.layers.showWidgets && editorConfiguration.clockCalendar.isEnabled {
             updateClockCalendarText()
             return
         }
 
         guard widgetConfiguration.isEnabled else {
-            widgetLayer.string = nil
+            clearLegacyWidgetLayer()
             return
         }
 
@@ -461,6 +606,8 @@ private final class VideoWallpaperView: NSView {
         }
 
         widgetLayer.string = lines.joined(separator: "\n")
+        widgetLayer.isHidden = lines.isEmpty
+        widgetLayer.backgroundColor = lines.isEmpty ? nil : NSColor.black.withAlphaComponent(0.28).cgColor
     }
 
     private static let clockFormatter: DateFormatter = {
@@ -490,8 +637,19 @@ private final class VideoWallpaperView: NSView {
         updateCloudAnimation()
     }
 
+    private func clearLegacyWidgetLayer() {
+        widgetLayer.string = nil
+        widgetLayer.isHidden = true
+        widgetLayer.backgroundColor = nil
+    }
+
+    private func clearDataDrivenWidgetLayers() {
+        widgetRuntime.unloadAll()
+    }
+
     private func updateWidgetTimer() {
-        let shouldRun = widgetConfiguration.isEnabled ||
+        let shouldRun = !editorConfiguration.activeWidgets.isEmpty ||
+            widgetConfiguration.isEnabled ||
             (editorConfiguration.layers.showWidgets && editorConfiguration.clockCalendar.isEnabled)
 
         if shouldRun, widgetTimer == nil {
@@ -533,6 +691,18 @@ private final class VideoWallpaperView: NSView {
         playerLayer?.filters = filters
     }
 
+    private func fadeInPlayerLayer(_ layer: CALayer) {
+        layer.removeAnimation(forKey: "wallpaper-alpha-restore")
+        layer.opacity = 1
+
+        let animation = CABasicAnimation(keyPath: "opacity")
+        animation.fromValue = 0
+        animation.toValue = 1
+        animation.duration = 0.22
+        animation.timingFunction = CAMediaTimingFunction(name: .easeOut)
+        layer.add(animation, forKey: "wallpaper-alpha-restore")
+    }
+
     private func updateCustomText() {
         let text = editorConfiguration.customText.text.trimmingCharacters(in: .whitespacesAndNewlines)
         customTextLayer.isHidden = !editorConfiguration.layers.showCustomText || text.isEmpty
@@ -551,7 +721,13 @@ private final class VideoWallpaperView: NSView {
 
     private func updateClockCalendarText() {
         let clock = editorConfiguration.clockCalendar
-        widgetLayer.isHidden = !clock.isEnabled
+        guard clock.isEnabled else {
+            clearLegacyWidgetLayer()
+            return
+        }
+
+        widgetLayer.isHidden = false
+        widgetLayer.backgroundColor = NSColor.black.withAlphaComponent(0.28).cgColor
         widgetLayer.font = clock.fontName as CFTypeRef
         widgetLayer.fontSize = clock.fontSize
         widgetLayer.alignmentMode = caAlignment(for: clock.alignment)
@@ -568,6 +744,17 @@ private final class VideoWallpaperView: NSView {
         }
 
         widgetLayer.string = lines.joined(separator: "\n")
+    }
+
+    private func updateDataDrivenWidgets() {
+        clearLegacyWidgetLayer()
+        let widgets = editorConfiguration.layers.showWidgets ? editorConfiguration.activeWidgets : []
+        widgetRuntime.render(widgets: widgets, on: layer, bounds: bounds)
+    }
+
+    private func updateDataDrivenWidgetFrames() {
+        let widgets = editorConfiguration.layers.showWidgets ? editorConfiguration.activeWidgets : []
+        widgetRuntime.render(widgets: widgets, on: layer, bounds: bounds)
     }
 
     private func configureCloudLayer() {

@@ -40,6 +40,15 @@ enum PosterFrameCache {
         return NSImage(contentsOf: url)
     }
 
+    static func remove(filename: String?) {
+        guard let filename,
+              let directory = try? posterDirectory() else {
+            return
+        }
+
+        try? FileManager.default.removeItem(at: directory.appendingPathComponent(filename))
+    }
+
     private static func posterDirectory() throws -> URL {
         let baseURL = try FileManager.default.url(
             for: .applicationSupportDirectory,

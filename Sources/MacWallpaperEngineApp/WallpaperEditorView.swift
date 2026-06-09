@@ -319,7 +319,7 @@ struct EditorSectionCard<Content: View>: View {
     }
 }
 
-private struct TuningSlider: View {
+struct TuningSlider: View {
     let title: String
     @Binding var value: Double
     let range: ClosedRange<Double>
@@ -371,7 +371,7 @@ struct InstalledFontPicker: View {
     }
 }
 
-private struct AlignmentPicker: View {
+struct AlignmentPicker: View {
     @Binding var selection: WallpaperTextAlignment
 
     var body: some View {
@@ -384,7 +384,7 @@ private struct AlignmentPicker: View {
     }
 }
 
-private struct PositionPicker: View {
+struct PositionPicker: View {
     @Binding var selection: WallpaperOverlayPosition
 
     var body: some View {
@@ -412,7 +412,7 @@ private struct PositionPicker: View {
     }
 }
 
-private struct AssetVariantPicker: View {
+struct AssetVariantPicker: View {
     let title: String
     let assets: [WallpaperAssetRecord]
     @Binding var selection: UUID?
@@ -433,7 +433,7 @@ private struct AssetVariantPicker: View {
     }
 }
 
-private struct TimeOfDayPicker: View {
+struct TimeOfDayPicker: View {
     let title: String
     @Binding var minutes: Int
 

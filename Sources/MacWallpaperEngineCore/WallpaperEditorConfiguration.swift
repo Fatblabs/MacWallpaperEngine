@@ -27,6 +27,8 @@ public enum WallpaperAppearance: String, Codable, Equatable, Sendable {
 
 public struct VideoTrimConfiguration: Codable, Equatable, Sendable {
     public static let longVideoThresholdSeconds: Double = 60
+    public static let minimumOptimizedSnippetSeconds: Double = 30
+    public static let maximumOptimizedSnippetSeconds: Double = 60
 
     public var startSeconds: Double
     public var endSeconds: Double?
@@ -53,6 +55,23 @@ public struct VideoTrimConfiguration: Codable, Equatable, Sendable {
 
     public func effectiveEndSeconds(forDuration duration: Double) -> Double {
         normalized(forDuration: duration).endSeconds ?? max(0, duration)
+    }
+
+    public func performanceSnippet(forDuration duration: Double) -> VideoTrimConfiguration {
+        guard duration.isFinite, duration > 0 else {
+            return VideoTrimConfiguration(startSeconds: 0, endSeconds: nil)
+        }
+
+        let normalized = normalized(forDuration: duration)
+        let requestedStart = normalized.startSeconds
+        let requestedEnd = normalized.effectiveEndSeconds(forDuration: duration)
+        let requestedLength = requestedEnd - requestedStart
+        let targetLength = min(
+            max(requestedLength, Self.minimumOptimizedSnippetSeconds),
+            min(Self.maximumOptimizedSnippetSeconds, duration)
+        )
+        let start = min(requestedStart, max(0, duration - targetLength))
+        return VideoTrimConfiguration(startSeconds: start, endSeconds: min(duration, start + targetLength))
     }
 }
 
@@ -184,6 +203,244 @@ public struct ClockCalendarConfiguration: Codable, Equatable, Sendable {
     }
 }
 
+public enum DesktopWidgetKind: String, CaseIterable, Codable, Equatable, Sendable {
+    case clock
+    case hardwareMonitor
+    case weather
+}
+
+public enum WidgetAnchor: String, CaseIterable, Codable, Equatable, Sendable {
+    case absolute
+    case topLeft
+    case topRight
+    case center
+    case bottomLeft
+    case bottomRight
+}
+
+public enum HardwareGraphStyle: String, CaseIterable, Codable, Equatable, Sendable {
+    case compactText
+    case bar
+    case line
+}
+
+public struct WidgetLayoutConfiguration: Codable, Equatable, Sendable {
+    public var anchor: WidgetAnchor
+    public var x: Double
+    public var y: Double
+    public var isAnchorLocked: Bool
+
+    public init(
+        anchor: WidgetAnchor = .topRight,
+        x: Double = 32,
+        y: Double = 32,
+        isAnchorLocked: Bool = true
+    ) {
+        self.anchor = anchor
+        self.x = x
+        self.y = y
+        self.isAnchorLocked = isAnchorLocked
+    }
+}
+
+public struct WidgetColor: Codable, Equatable, Sendable {
+    public var red: Double
+    public var green: Double
+    public var blue: Double
+    public var alpha: Double
+
+    public init(red: Double = 1, green: Double = 1, blue: Double = 1, alpha: Double = 1) {
+        self.red = red
+        self.green = green
+        self.blue = blue
+        self.alpha = alpha
+    }
+
+    public static let white = WidgetColor()
+    public static let blackShadow = WidgetColor(red: 0, green: 0, blue: 0, alpha: 0.72)
+}
+
+public struct WidgetVisualStyle: Codable, Equatable, Sendable {
+    public var fontName: String
+    public var scale: Double
+    public var opacity: Double
+    public var foregroundColor: WidgetColor
+    public var shadowColor: WidgetColor
+    public var shadowRadius: Double
+
+    public init(
+        fontName: String = "Helvetica Neue",
+        scale: Double = 1,
+        opacity: Double = 1,
+        foregroundColor: WidgetColor = .white,
+        shadowColor: WidgetColor = .blackShadow,
+        shadowRadius: Double = 8
+    ) {
+        self.fontName = fontName
+        self.scale = scale
+        self.opacity = opacity
+        self.foregroundColor = foregroundColor
+        self.shadowColor = shadowColor
+        self.shadowRadius = shadowRadius
+    }
+}
+
+public struct WidgetRefreshConfiguration: Codable, Equatable, Sendable {
+    public var intervalSeconds: Double
+
+    public init(intervalSeconds: Double = 1) {
+        self.intervalSeconds = intervalSeconds
+    }
+}
+
+public struct ClockWidgetProperties: Codable, Equatable, Sendable {
+    public var showTime: Bool
+    public var showDate: Bool
+    public var use24HourClock: Bool
+    public var alignment: WallpaperTextAlignment
+
+    public init(
+        showTime: Bool = true,
+        showDate: Bool = false,
+        use24HourClock: Bool = false,
+        alignment: WallpaperTextAlignment = .right
+    ) {
+        self.showTime = showTime
+        self.showDate = showDate
+        self.use24HourClock = use24HourClock
+        self.alignment = alignment
+    }
+}
+
+public struct HardwareMonitorWidgetProperties: Codable, Equatable, Sendable {
+    public var showCPU: Bool
+    public var showRAM: Bool
+    public var graphStyle: HardwareGraphStyle
+
+    public init(showCPU: Bool = true, showRAM: Bool = true, graphStyle: HardwareGraphStyle = .compactText) {
+        self.showCPU = showCPU
+        self.showRAM = showRAM
+        self.graphStyle = graphStyle
+    }
+}
+
+public struct WeatherWidgetProperties: Codable, Equatable, Sendable {
+    public var locationLabel: String
+    public var useCelsius: Bool
+
+    public init(locationLabel: String = "Local Weather", useCelsius: Bool = false) {
+        self.locationLabel = locationLabel
+        self.useCelsius = useCelsius
+    }
+}
+
+public struct DesktopWidgetConfiguration: Identifiable, Codable, Equatable, Sendable {
+    public var id: UUID
+    public var kind: DesktopWidgetKind
+    public var name: String
+    public var isVisible: Bool
+    public var layout: WidgetLayoutConfiguration
+    public var style: WidgetVisualStyle
+    public var refresh: WidgetRefreshConfiguration
+    public var clock: ClockWidgetProperties
+    public var hardwareMonitor: HardwareMonitorWidgetProperties
+    public var weather: WeatherWidgetProperties
+
+    public init(
+        id: UUID = UUID(),
+        kind: DesktopWidgetKind,
+        name: String,
+        isVisible: Bool = true,
+        layout: WidgetLayoutConfiguration = WidgetLayoutConfiguration(),
+        style: WidgetVisualStyle = WidgetVisualStyle(),
+        refresh: WidgetRefreshConfiguration = WidgetRefreshConfiguration(),
+        clock: ClockWidgetProperties = ClockWidgetProperties(),
+        hardwareMonitor: HardwareMonitorWidgetProperties = HardwareMonitorWidgetProperties(),
+        weather: WeatherWidgetProperties = WeatherWidgetProperties()
+    ) {
+        self.id = id
+        self.kind = kind
+        self.name = name
+        self.isVisible = isVisible
+        self.layout = layout
+        self.style = style
+        self.refresh = refresh
+        self.clock = clock
+        self.hardwareMonitor = hardwareMonitor
+        self.weather = weather
+    }
+
+    public static func clock(name: String = "Clock") -> DesktopWidgetConfiguration {
+        DesktopWidgetConfiguration(kind: .clock, name: name, layout: WidgetLayoutConfiguration(anchor: .topRight))
+    }
+
+    public static func hardwareMonitor(name: String = "Hardware Monitor") -> DesktopWidgetConfiguration {
+        DesktopWidgetConfiguration(
+            kind: .hardwareMonitor,
+            name: name,
+            layout: WidgetLayoutConfiguration(anchor: .bottomRight),
+            refresh: WidgetRefreshConfiguration(intervalSeconds: 2)
+        )
+    }
+
+    public static func weather(name: String = "Weather") -> DesktopWidgetConfiguration {
+        DesktopWidgetConfiguration(
+            kind: .weather,
+            name: name,
+            layout: WidgetLayoutConfiguration(anchor: .topLeft),
+            refresh: WidgetRefreshConfiguration(intervalSeconds: 1_800)
+        )
+    }
+
+    public var emitsVisibleContent: Bool {
+        guard isVisible else { return false }
+
+        switch kind {
+        case .clock:
+            return clock.showTime || clock.showDate
+        case .hardwareMonitor:
+            return hardwareMonitor.showCPU || hardwareMonitor.showRAM
+        case .weather:
+            return !weather.locationLabel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+    }
+}
+
+public struct PlaylistConfiguration: Codable, Equatable, Sendable {
+    public var assetIDs: [UUID]
+    public var currentIndex: Int
+    public var crossfadeDuration: Double
+
+    public init(assetIDs: [UUID] = [], currentIndex: Int = 0, crossfadeDuration: Double = 1.5) {
+        self.assetIDs = assetIDs
+        self.currentIndex = currentIndex
+        self.crossfadeDuration = crossfadeDuration
+    }
+
+    public var isMultiVideo: Bool {
+        assetIDs.count > 1
+    }
+
+    public func normalizedCurrentIndex() -> Int {
+        guard !assetIDs.isEmpty else { return 0 }
+        return min(max(0, currentIndex), assetIDs.count - 1)
+    }
+
+    public mutating func move(from source: IndexSet, to destination: Int) {
+        let sourceIndexes = source.sorted()
+        let moving = sourceIndexes.map { assetIDs[$0] }
+
+        for index in sourceIndexes.reversed() {
+            assetIDs.remove(at: index)
+        }
+
+        let removedBeforeDestination = sourceIndexes.filter { $0 < destination }.count
+        let insertionIndex = min(max(0, destination - removedBeforeDestination), assetIDs.count)
+        assetIDs.insert(contentsOf: moving, at: insertionIndex)
+        currentIndex = normalizedCurrentIndex()
+    }
+}
+
 public struct ThemeSyncConfiguration: Codable, Equatable, Sendable {
     public var mode: WallpaperThemeSyncMode
     public var lightAssetID: UUID?
@@ -254,6 +511,8 @@ public struct WallpaperEditorConfiguration: Codable, Equatable, Sendable {
     public var themeSync: ThemeSyncConfiguration
     public var customText: CustomTextConfiguration
     public var clockCalendar: ClockCalendarConfiguration
+    public var widgets: [DesktopWidgetConfiguration]
+    public var playlist: PlaylistConfiguration
 
     public init(
         videoTrim: VideoTrimConfiguration = VideoTrimConfiguration(),
@@ -264,7 +523,9 @@ public struct WallpaperEditorConfiguration: Codable, Equatable, Sendable {
         mouseInteraction: MouseInteractionConfiguration = MouseInteractionConfiguration(),
         themeSync: ThemeSyncConfiguration = ThemeSyncConfiguration(),
         customText: CustomTextConfiguration = CustomTextConfiguration(),
-        clockCalendar: ClockCalendarConfiguration = ClockCalendarConfiguration()
+        clockCalendar: ClockCalendarConfiguration = ClockCalendarConfiguration(),
+        widgets: [DesktopWidgetConfiguration] = [],
+        playlist: PlaylistConfiguration = PlaylistConfiguration()
     ) {
         self.videoTrim = videoTrim
         self.color = color
@@ -275,11 +536,61 @@ public struct WallpaperEditorConfiguration: Codable, Equatable, Sendable {
         self.themeSync = themeSync
         self.customText = customText
         self.clockCalendar = clockCalendar
+        self.widgets = widgets
+        self.playlist = playlist
     }
 
     public static let `default` = WallpaperEditorConfiguration()
 
     public var clampedPlaybackSpeed: Double {
         min(max(playbackSpeed, 0.25), 2)
+    }
+
+    public var activeWidgets: [DesktopWidgetConfiguration] {
+        widgets.filter(\.emitsVisibleContent)
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case videoTrim
+        case color
+        case blurTint
+        case layers
+        case playbackSpeed
+        case mouseInteraction
+        case themeSync
+        case customText
+        case clockCalendar
+        case widgets
+        case playlist
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        videoTrim = try container.decodeIfPresent(VideoTrimConfiguration.self, forKey: .videoTrim) ?? VideoTrimConfiguration()
+        color = try container.decodeIfPresent(ColorTuningConfiguration.self, forKey: .color) ?? ColorTuningConfiguration()
+        blurTint = try container.decodeIfPresent(BlurTintConfiguration.self, forKey: .blurTint) ?? BlurTintConfiguration()
+        layers = try container.decodeIfPresent(ComponentLayerConfiguration.self, forKey: .layers) ?? ComponentLayerConfiguration()
+        playbackSpeed = try container.decodeIfPresent(Double.self, forKey: .playbackSpeed) ?? 1
+        mouseInteraction = try container.decodeIfPresent(MouseInteractionConfiguration.self, forKey: .mouseInteraction) ?? MouseInteractionConfiguration()
+        themeSync = try container.decodeIfPresent(ThemeSyncConfiguration.self, forKey: .themeSync) ?? ThemeSyncConfiguration()
+        customText = try container.decodeIfPresent(CustomTextConfiguration.self, forKey: .customText) ?? CustomTextConfiguration()
+        clockCalendar = try container.decodeIfPresent(ClockCalendarConfiguration.self, forKey: .clockCalendar) ?? ClockCalendarConfiguration()
+        widgets = try container.decodeIfPresent([DesktopWidgetConfiguration].self, forKey: .widgets) ?? []
+        playlist = try container.decodeIfPresent(PlaylistConfiguration.self, forKey: .playlist) ?? PlaylistConfiguration()
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(videoTrim, forKey: .videoTrim)
+        try container.encode(color, forKey: .color)
+        try container.encode(blurTint, forKey: .blurTint)
+        try container.encode(layers, forKey: .layers)
+        try container.encode(playbackSpeed, forKey: .playbackSpeed)
+        try container.encode(mouseInteraction, forKey: .mouseInteraction)
+        try container.encode(themeSync, forKey: .themeSync)
+        try container.encode(customText, forKey: .customText)
+        try container.encode(clockCalendar, forKey: .clockCalendar)
+        try container.encode(widgets, forKey: .widgets)
+        try container.encode(playlist, forKey: .playlist)
     }
 }

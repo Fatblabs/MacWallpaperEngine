@@ -28,22 +28,16 @@ struct PerformanceSettingsView: View {
                     Slider(value: $appState.policy.coverageThreshold, in: 0.5...1.0, step: 0.05)
                 }
 
-                Stepper(value: $appState.policy.batteryFPSCap, in: 1...60) {
-                    Text("Battery cap: \(appState.policy.batteryFPSCap) fps")
-                }
+                FPSCapControl(title: "Battery cap", fps: $appState.policy.batteryFPSCap)
 
-                Picker("Normal FPS cap", selection: Binding(
-                    get: { appState.policy.normalFPSCap ?? 0 },
-                    set: { value in
-                        appState.policy.normalFPSCap = value == 0 ? nil : value
-                    }
-                )) {
-                    Text("Native").tag(0)
-                    Text("60 fps").tag(60)
-                    Text("30 fps").tag(30)
-                    Text("24 fps").tag(24)
-                    Text("15 fps").tag(15)
-                }
+                FPSCapControl(
+                    title: "Normal FPS cap",
+                    fps: Binding(
+                        get: { appState.policy.normalFPSCap ?? 0 },
+                        set: { appState.policy.normalFPSCap = $0 == 0 ? nil : $0 }
+                    ),
+                    allowsNative: true
+                )
             }
 
             Section("Current Status") {

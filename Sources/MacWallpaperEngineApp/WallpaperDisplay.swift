@@ -42,4 +42,11 @@ struct WallpaperDisplayConfiguration {
     var assetDuration: Double
     var layoutMode: WallpaperLayoutMode
     var editorConfiguration: WallpaperEditorConfiguration
+    var playlistItems: [WallpaperPlaylistItemConfiguration]
+}
+
+struct WallpaperPlaylistItemConfiguration: Identifiable, Equatable {
+    var id: UUID
+    var url: URL
+    var duration: Double
 }
