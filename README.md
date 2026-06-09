@@ -13,6 +13,7 @@ The v1 implementation focuses on the important bits first:
 - menu bar controls plus a SwiftUI settings window
 - a wallpaper creator for trimming long videos, tuning color, changing playback speed, toggling composition layers, adding text, and configuring clock/calendar widgets
 - a unified three-panel editor: library sidebar, live-preview canvas with contextual lower pane, and collapsible inspector
+- playlist ordering with AVQueuePlayer-backed playback and crossfade transition composition
 - modular widget runtime for Clock, Hardware Monitor, and Weather modules that can load, update, swap, and unload without restarting wallpaper playback
 - light/dark and time-of-day wallpaper variant switching
 - UserDefaults-backed restoration snapshot for the last active wallpapers and display assignments, with immediate background window setup and alpha-fade video restoration
