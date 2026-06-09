@@ -13,6 +13,7 @@ public struct WallpaperAssetRestoreMetadata: Codable, Equatable, Sendable, Ident
     public var editorFingerprint: String
 
     public init(
+        id: UUID,
         displayName: String,
         originalFilename: String,
         lastKnownPath: String,
