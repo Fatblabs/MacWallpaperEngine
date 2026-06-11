@@ -3,104 +3,6 @@ import MacWallpaperEngineCore
 import SwiftData
 import SwiftUI
 
-struct WallpaperEditorView: View {
-    @Environment(\.modelContext) private var modelContext
-    @EnvironmentObject private var appState: AppState
-
-    let assets: [WallpaperAssetRecord]
-    let profiles: [DisplayProfileRecord]
-
-    @State private var selectedAssetID: UUID?
-
-    private var selectedAsset: WallpaperAssetRecord? {
-        if let selectedAssetID,
-           let selected = assets.first(where: { $0.id == selectedAssetID }) {
-            return selected
-        }
-
-        return assignedOrFirstAsset
-    }
-
-    private var assignedOrFirstAsset: WallpaperAssetRecord? {
-        if let assignedAssetID = profiles.compactMap(\.assignedAssetID).first,
-           let assigned = assets.first(where: { $0.id == assignedAssetID }) {
-            return assigned
-        }
-
-        return assets.first
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Wallpaper Creator")
-                    .font(.largeTitle.weight(.semibold))
-                Text("Trim, tune, layer, and personalize the active wallpaper without leaving the app.")
-                    .foregroundStyle(.secondary)
-            }
-
-            if assets.isEmpty {
-                ContentUnavailableView(
-                    "No Wallpaper to Edit",
-                    systemImage: "wand.and.stars",
-                    description: Text("Import a local video first, then come back here to create variants and widgets.")
-                )
-            } else if let selectedAsset {
-                Picker("Wallpaper", selection: Binding(
-                    get: { selectedAsset.id },
-                    set: { selectedAssetID = $0 }
-                )) {
-                    ForEach(assets) { asset in
-                        Text(asset.displayName).tag(asset.id)
-                    }
-                }
-                .frame(maxWidth: 420)
-
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 14) {
-                        TrimEditorSection(asset: selectedAsset, configuration: configurationBinding(for: selectedAsset))
-                        ColorEditorSection(configuration: configurationBinding(for: selectedAsset))
-                        PlaybackEditorSection(configuration: configurationBinding(for: selectedAsset))
-                        LayerEditorSection(configuration: configurationBinding(for: selectedAsset))
-                        TextEditorSection(configuration: configurationBinding(for: selectedAsset))
-                        ClockCalendarEditorSection(configuration: configurationBinding(for: selectedAsset))
-                        InteractionEditorSection(configuration: configurationBinding(for: selectedAsset))
-                        ThemeSyncEditorSection(
-                            assets: assets,
-                            configuration: configurationBinding(for: selectedAsset)
-                        )
-                    }
-                    .padding(.bottom, 28)
-                }
-            }
-        }
-        .padding(24)
-        .onAppear {
-            selectedAssetID = selectedAsset?.id
-        }
-        .onChange(of: assets.map(\.id)) {
-            if selectedAsset == nil {
-                selectedAssetID = assets.first?.id
-            }
-        }
-    }
-
-    private func configurationBinding(for asset: WallpaperAssetRecord) -> Binding<WallpaperEditorConfiguration> {
-        Binding {
-            asset.editorConfiguration
-        } set: { newValue in
-            appState.updateEditorConfiguration(
-                for: asset,
-                assets: assets,
-                profiles: profiles,
-                modelContext: modelContext
-            ) { configuration in
-                configuration = newValue
-            }
-        }
-    }
-}
-
 struct TrimEditorSection: View {
     let asset: WallpaperAssetRecord
     @Binding var configuration: WallpaperEditorConfiguration
@@ -388,12 +290,37 @@ struct PositionPicker: View {
     @Binding var selection: WallpaperOverlayPosition
 
     var body: some View {
-        Picker("Position", selection: $selection) {
-            ForEach(WallpaperOverlayPosition.allCases, id: \.self) { position in
-                Text(title(for: position)).tag(position)
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Position")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+
+            LazyVGrid(
+                columns: [GridItem(.adaptive(minimum: 96), spacing: 8)],
+                alignment: .leading,
+                spacing: 8
+            ) {
+                ForEach(WallpaperOverlayPosition.allCases, id: \.self) { position in
+                    Button {
+                        selection = position
+                    } label: {
+                        Text(title(for: position))
+                            .lineLimit(1)
+                            .font(.caption.weight(.medium))
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 6)
+                            .frame(maxWidth: .infinity)
+                            .background(
+                                selection == position ? Color.accentColor : Color.secondary.opacity(0.16),
+                                in: RoundedRectangle(cornerRadius: 6)
+                            )
+                            .foregroundStyle(selection == position ? .white : .primary)
+                    }
+                    .buttonStyle(.plain)
+                    .controlSize(.small)
+                }
             }
         }
-        .pickerStyle(.segmented)
     }
 
     private func title(for position: WallpaperOverlayPosition) -> String {

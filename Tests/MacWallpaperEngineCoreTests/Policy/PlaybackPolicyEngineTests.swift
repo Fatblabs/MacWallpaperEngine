@@ -20,6 +20,31 @@ struct PlaybackPolicyEngineTests {
     }
 
     @Test
+    func frameRateCapsSupportFiveHundredHertz() {
+        let engine = PlaybackPolicyEngine()
+        let context = PlaybackContext(
+            displayID: 1,
+            desktopCoverage: 0,
+            isFullscreenAppCoveringDisplay: false,
+            powerSource: .ac,
+            isLowPowerModeEnabled: false,
+            thermalPressure: .nominal
+        )
+        let policy = PlaybackPolicy(normalFPSCap: 999)
+
+        #expect(engine.mode(for: context, policy: policy) == .capped(fps: 500))
+        #expect(PlaybackFrameRateCompensation.clampedTargetFPS(500) == 500)
+        #expect(PlaybackFrameRateCompensation.clampedTargetFPS(501) == 500)
+    }
+
+    @Test
+    func frameRateCompensationMatchesTargetToSourceRatio() {
+        #expect(PlaybackFrameRateCompensation.multiplier(sourceFPS: 60, targetFPS: 120) == 2)
+        #expect(PlaybackFrameRateCompensation.multiplier(sourceFPS: 120, targetFPS: 60) == 1)
+        #expect(PlaybackFrameRateCompensation.multiplier(sourceFPS: 60, targetFPS: 500).rounded(.down) == 8)
+    }
+
+    @Test
     func fullscreenPausesImmediately() {
         let engine = PlaybackPolicyEngine()
         let context = PlaybackContext(

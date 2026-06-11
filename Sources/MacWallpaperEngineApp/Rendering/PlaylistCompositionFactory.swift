@@ -2,6 +2,7 @@ import AVFoundation
 import CoreGraphics
 import Foundation
 
+@MainActor
 enum PlaylistCompositionFactory {
     static func playerItem(
         currentURL: URL,

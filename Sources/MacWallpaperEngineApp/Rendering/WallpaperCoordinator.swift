@@ -201,6 +201,7 @@ private final class VideoWallpaperView: NSView {
     private var widgetConfiguration = WidgetOverlayConfiguration()
     private var editorConfiguration = WallpaperEditorConfiguration.default
     private var lastPlaybackMode: PlaybackMode = .full
+    private var sourceFrameRate: Double = 0
     private var securityScopedURL: URL?
     private var securityScopeIsActive = false
 
@@ -231,6 +232,7 @@ private final class VideoWallpaperView: NSView {
         updateCustomTextFrame()
         updateDataDrivenWidgetFrames()
         updateWidgetFrame()
+        updateCanvasResolution()
     }
 
     func prepareForImmediateDisplay() {
@@ -278,6 +280,7 @@ private final class VideoWallpaperView: NSView {
         securityScopeIsActive = url.startAccessingSecurityScopedResource()
 
         let asset = AVURLAsset(url: url)
+        sourceFrameRate = nominalFrameRate(for: asset)
         let item = AVPlayerItem(asset: asset)
         let player = AVQueuePlayer()
         player.isMuted = true
@@ -306,7 +309,7 @@ private final class VideoWallpaperView: NSView {
         showPlaceholder(false)
         updateEditorPresentation()
         fadeInPlayerLayer(layer)
-        player.playImmediately(atRate: Float(editorConfiguration.clampedPlaybackSpeed))
+        play(for: lastPlaybackMode)
     }
 
     private func setPlaylist(
@@ -323,6 +326,7 @@ private final class VideoWallpaperView: NSView {
         securityScopeIsActive = false
 
         currentPlaylistIndex = min(max(0, editorConfiguration.playlist.currentIndex), items.count - 1)
+        sourceFrameRate = nominalFrameRate(for: AVURLAsset(url: items[currentPlaylistIndex].url))
 
         let player = AVQueuePlayer()
         player.isMuted = true
@@ -345,21 +349,23 @@ private final class VideoWallpaperView: NSView {
         showPlaceholder(false)
         updateEditorPresentation()
         fadeInPlayerLayer(layer)
-        player.playImmediately(atRate: Float(editorConfiguration.clampedPlaybackSpeed))
+        play(for: lastPlaybackMode)
     }
 
     func apply(_ mode: PlaybackMode) {
+        lastPlaybackMode = mode
+        play(for: mode)
+    }
+
+    private func play(for mode: PlaybackMode) {
         switch mode {
         case .full:
-            queuePlayer?.playImmediately(atRate: Float(editorConfiguration.clampedPlaybackSpeed))
+            queuePlayer?.playImmediately(atRate: effectivePlaybackRate(for: mode))
         case .capped:
-            // AVPlayerLayer keeps decode/display in the native pipeline; the Metal path will enforce
-            // true frame caps when enhanced rendering is enabled.
-            queuePlayer?.playImmediately(atRate: Float(editorConfiguration.clampedPlaybackSpeed))
+            queuePlayer?.playImmediately(atRate: effectivePlaybackRate(for: mode))
         case .posterFrame, .paused:
             queuePlayer?.pause()
         }
-        lastPlaybackMode = mode
     }
 
     func setEditMode(_ isEnabled: Bool) {
@@ -532,6 +538,7 @@ private final class VideoWallpaperView: NSView {
                 }
 
                 self.currentPlaylistIndex = (self.currentPlaylistIndex + 1) % max(1, self.playlistItems.count)
+                self.sourceFrameRate = self.nominalFrameRate(for: AVURLAsset(url: self.playlistItems[self.currentPlaylistIndex].url))
                 self.enqueuePlaylistItems(startingAt: self.currentPlaylistIndex, minimumQueuedItems: min(3, self.playlistItems.count))
             }
         }
@@ -628,6 +635,7 @@ private final class VideoWallpaperView: NSView {
         fogLayer.isHidden = !editorConfiguration.layers.showAmbientFog
         cloudLayer.isHidden = !editorConfiguration.layers.showMovingClouds
         foregroundLayer.isHidden = !editorConfiguration.layers.showForegroundVignette
+        updateCanvasResolution()
         updateVideoFilters()
         updateCustomText()
         updateWidgetFrame()
@@ -689,6 +697,52 @@ private final class VideoWallpaperView: NSView {
         }
 
         playerLayer?.filters = filters
+    }
+
+    private func nominalFrameRate(for asset: AVAsset) -> Double {
+        let nominalFrameRate = asset.tracks(withMediaType: .video).first?.nominalFrameRate ?? 0
+        guard nominalFrameRate.isFinite, nominalFrameRate > 0 else { return 0 }
+        return Double(nominalFrameRate)
+    }
+
+    private func effectivePlaybackRate(for mode: PlaybackMode) -> Float {
+        let baseRate = editorConfiguration.clampedPlaybackSpeed
+        guard sourceFrameRate > 0,
+              let targetFPS = targetFramesPerSecond(for: mode),
+              Double(targetFPS) > sourceFrameRate else {
+            return Float(baseRate)
+        }
+
+        let multiplier = PlaybackFrameRateCompensation.multiplier(sourceFPS: sourceFrameRate, targetFPS: targetFPS)
+        return Float(baseRate * multiplier)
+    }
+
+    private func targetFramesPerSecond(for mode: PlaybackMode) -> Int? {
+        switch mode {
+        case .full:
+            let nativeRefreshRate = window?.screen?.maximumFramesPerSecond ?? NSScreen.main?.maximumFramesPerSecond ?? 60
+            return PlaybackFrameRateCompensation.clampedTargetFPS(nativeRefreshRate)
+        case .capped(let fps):
+            return PlaybackFrameRateCompensation.clampedTargetFPS(fps)
+        case .posterFrame, .paused:
+            return nil
+        }
+    }
+
+    private func updateCanvasResolution() {
+        let nativeScale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2
+        let displayPixelSize = (
+            width: Double(max(1, bounds.width * nativeScale)),
+            height: Double(max(1, bounds.height * nativeScale))
+        )
+        let backingRatio = editorConfiguration.canvasResolution.backingScale(forDisplayPixelSize: displayPixelSize) ?? 1
+        let outputScale = max(0.5, min(nativeScale, nativeScale * CGFloat(backingRatio)))
+
+        playerLayer?.contentsScale = outputScale
+        tintLayer.contentsScale = outputScale
+        fogLayer.contentsScale = outputScale
+        cloudLayer.contentsScale = outputScale
+        foregroundLayer.contentsScale = outputScale
     }
 
     private func fadeInPlayerLayer(_ layer: CALayer) {

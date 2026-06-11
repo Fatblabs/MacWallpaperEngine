@@ -131,6 +131,27 @@ struct WallpaperEditorConfigurationTests {
         #expect(configuration.playbackSpeed == 1)
         #expect(configuration.widgets.isEmpty)
         #expect(configuration.playlist.assetIDs.isEmpty)
+        #expect(configuration.canvasResolution.mode == .autoNative)
+    }
+
+    @Test
+    func canvasResolutionPresetsExposeTargetSizeAndScale() {
+        let resolution = WallpaperCanvasResolution.fhd1080p
+
+        #expect(resolution.pixelSize?.width == 1_920)
+        #expect(resolution.pixelSize?.height == 1_080)
+        #expect(resolution.backingScale(forDisplayPixelSize: (width: 3_840, height: 2_160)) == 0.5)
+        #expect(resolution.aspectRatio(fallbackWidth: 1, fallbackHeight: 1) == 16.0 / 9.0)
+    }
+
+    @Test
+    func customCanvasAspectIsClampedAndUsesFallbackOnlyForAuto() {
+        let custom = WallpaperCanvasResolution(mode: .customAspect, customAspectWidth: 21, customAspectHeight: 9)
+        let auto = WallpaperCanvasResolution.auto
+
+        #expect(custom.pixelSize == nil)
+        #expect(custom.aspectRatio(fallbackWidth: 4, fallbackHeight: 3) == 21.0 / 9.0)
+        #expect(auto.aspectRatio(fallbackWidth: 4, fallbackHeight: 3) == 4.0 / 3.0)
     }
 
     @Test
@@ -160,6 +181,8 @@ struct WallpaperEditorConfigurationTests {
     @Test
     func persistentWallpaperSnapshotRoundTripsDisplayAssignments() throws {
         let assetID = UUID()
+        let bookmarkData = Data([1, 2, 3])
+        let editorConfigurationData = try JSONEncoder().encode(WallpaperEditorConfiguration.default)
         let snapshot = PersistentWallpaperSnapshot(
             updatedAt: Date(timeIntervalSince1970: 1_234),
             activeAssetIDs: [assetID],
@@ -168,12 +191,14 @@ struct WallpaperEditorConfigurationTests {
                     id: assetID,
                     displayName: "Ocean",
                     originalFilename: "ocean.mov",
+                    bookmarkData: bookmarkData,
                     lastKnownPath: "/Users/example/ocean.mov",
                     duration: 42,
                     pixelWidth: 3840,
                     pixelHeight: 2160,
                     codecSummary: "hvc1",
                     posterFrameFilename: "poster.png",
+                    editorConfigurationData: editorConfigurationData,
                     editorFingerprint: "abc"
                 )
             ],
@@ -192,5 +217,46 @@ struct WallpaperEditorConfigurationTests {
         #expect(decoded == snapshot)
         #expect(decoded.assignedAssetID(for: "100") == assetID)
         #expect(decoded.assignedAssetID(for: "missing") == nil)
+        #expect(decoded.assets.first?.bookmarkData == bookmarkData)
+        #expect(decoded.assets.first?.editorConfigurationData == editorConfigurationData)
+        #expect(decoded.assets.first?.editorConfiguration == .default)
+    }
+
+    @Test
+    func persistentWallpaperSnapshotDecodesLegacyMetadata() throws {
+        let assetID = UUID()
+        let snapshotJSON = """
+        {
+          "updatedAt": 1234,
+          "activeAssetIDs": ["\(assetID.uuidString)"],
+          "assets": [
+            {
+              "id": "\(assetID.uuidString)",
+              "displayName": "Ocean",
+              "originalFilename": "ocean.mov",
+              "lastKnownPath": "/Users/example/ocean.mov",
+              "duration": 42,
+              "pixelWidth": 3840,
+              "pixelHeight": 2160,
+              "codecSummary": "hvc1",
+              "posterFrameFilename": "poster.png",
+              "editorFingerprint": "abc"
+            }
+          ],
+          "displayAssignments": [
+            {
+              "screenID": "100",
+              "assetID": "\(assetID.uuidString)",
+              "layoutModeRawValue": "fill"
+            }
+          ]
+        }
+        """.data(using: .utf8)!
+
+        let decoded = try JSONDecoder().decode(PersistentWallpaperSnapshot.self, from: snapshotJSON)
+
+        #expect(decoded.assets.first?.bookmarkData == nil)
+        #expect(decoded.assets.first?.editorConfigurationData == nil)
+        #expect(decoded.assets.first?.editorConfiguration == .default)
     }
 }

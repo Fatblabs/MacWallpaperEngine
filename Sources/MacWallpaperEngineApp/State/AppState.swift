@@ -1,7 +1,6 @@
 import AppKit
 import Foundation
 import MacWallpaperEngineCore
-import Observation
 import SwiftData
 import UniformTypeIdentifiers
 
@@ -42,6 +41,7 @@ final class AppState: ObservableObject {
     private var latestAssets: [WallpaperAssetRecord] = []
     private var latestProfiles: [DisplayProfileRecord] = []
     private var restoredSnapshot: PersistentWallpaperSnapshot?
+    private var didObserveStoredAssetSnapshot = false
     private let policyDefaultsKey = "MacWallpaperEngine.playbackPolicy"
     private let widgetDefaultsKey = "MacWallpaperEngine.widgetConfiguration"
 
@@ -122,11 +122,47 @@ final class AppState: ObservableObject {
         }
     }
 
+    func bootstrapFromStore(modelContext: ModelContext) {
+        start()
+
+        do {
+            let (storedAssets, storedProfiles) = try storedConfiguration(from: modelContext)
+
+            if !storedAssets.isEmpty {
+                didObserveStoredAssetSnapshot = true
+            } else if shouldPreserveRestoredSnapshot {
+                if applyRestoredSnapshotIfAvailable(status: "Restoring saved wallpaper...") {
+                    return
+                }
+                statusMessage = "Saved wallpaper could not be restored"
+                return
+            }
+
+            reconcile(assets: storedAssets, profiles: storedProfiles)
+        } catch {
+            lastErrorMessage = "Startup restore failed: \(error.localizedDescription)"
+        }
+    }
+
     func reconcile(assets: [WallpaperAssetRecord], profiles: [DisplayProfileRecord]) {
         start()
         latestAssets = assets
         latestProfiles = profiles
-        WallpaperStateCache.save(assets: assets, profiles: profiles)
+
+        if assets.isEmpty && shouldPreserveRestoredSnapshot {
+            if !applyRestoredSnapshotIfAvailable(status: "Restoring saved wallpaper...") {
+                statusMessage = "Waiting for saved wallpaper..."
+            }
+            return
+        }
+
+        let hasRestorableSnapshot = restoredSnapshot?.activeAssetIDs.isEmpty == false
+        if !assets.isEmpty {
+            didObserveStoredAssetSnapshot = true
+        }
+        if !assets.isEmpty || didObserveStoredAssetSnapshot || !hasRestorableSnapshot {
+            restoredSnapshot = WallpaperStateCache.save(assets: assets, profiles: profiles)
+        }
 
         let configurations = WallpaperDisplay.displays().compactMap { display -> WallpaperDisplayConfiguration? in
             let profile = profiles.first { $0.screenID == display.idString }
@@ -171,6 +207,44 @@ final class AppState: ObservableObject {
 
         wallpaperCoordinator.apply(configurations: configurations)
         evaluatePlaybackPolicy()
+    }
+
+    private var shouldPreserveRestoredSnapshot: Bool {
+        !didObserveStoredAssetSnapshot && restoredSnapshot?.activeAssetIDs.isEmpty == false
+    }
+
+    @discardableResult
+    private func applyRestoredSnapshotIfAvailable(status: String) -> Bool {
+        guard let restoredSnapshot else { return false }
+        let configurations = WallpaperSnapshotResolver.configurations(
+            from: restoredSnapshot,
+            displays: WallpaperDisplay.displays(),
+            appearance: currentWallpaperAppearance(),
+            minuteOfDay: currentMinuteOfDay()
+        )
+        guard !configurations.isEmpty else { return false }
+
+        wallpaperCoordinator.apply(configurations: configurations)
+        evaluatePlaybackPolicy()
+        statusMessage = status
+        lastErrorMessage = nil
+        return true
+    }
+
+    private func storedConfiguration(from modelContext: ModelContext) throws -> ([WallpaperAssetRecord], [DisplayProfileRecord]) {
+        let assetDescriptor = FetchDescriptor<WallpaperAssetRecord>(
+            sortBy: [SortDescriptor(\.createdAt, order: .reverse)]
+        )
+        let profileDescriptor = FetchDescriptor<DisplayProfileRecord>()
+        return (
+            try modelContext.fetch(assetDescriptor),
+            try modelContext.fetch(profileDescriptor)
+        )
+    }
+
+    private func reconcileFromStore(modelContext: ModelContext) throws {
+        let (storedAssets, storedProfiles) = try storedConfiguration(from: modelContext)
+        reconcile(assets: storedAssets, profiles: storedProfiles)
     }
 
     private func reconcileLatestConfiguration() {
@@ -230,6 +304,7 @@ final class AppState: ObservableObject {
             }
 
             try modelContext.save()
+            try reconcileFromStore(modelContext: modelContext)
             statusMessage = "Imported \(metadata.originalFilename)"
             lastErrorMessage = nil
         } catch {
@@ -263,6 +338,7 @@ final class AppState: ObservableObject {
             }
 
             try modelContext.save()
+            try reconcileFromStore(modelContext: modelContext)
             statusMessage = "Set \(asset.displayName)"
         } catch {
             lastErrorMessage = error.localizedDescription
@@ -302,7 +378,6 @@ final class AppState: ObservableObject {
             try modelContext.save()
 
             PosterFrameCache.remove(filename: removedPosterFrameFilename)
-            WallpaperStateCache.save(assets: remainingAssets, profiles: profiles)
             reconcile(assets: remainingAssets, profiles: profiles)
             statusMessage = "Removed \(removedDisplayName)"
             lastErrorMessage = nil
@@ -324,6 +399,7 @@ final class AppState: ObservableObject {
             }
 
             try modelContext.save()
+            try reconcileFromStore(modelContext: modelContext)
             statusMessage = "Updated \(display.name)"
         } catch {
             lastErrorMessage = error.localizedDescription
@@ -399,9 +475,9 @@ final class AppState: ObservableObject {
                 modelContext.insert(record)
 
                 try modelContext.save()
+                try reconcileFromStore(modelContext: modelContext)
                 statusMessage = "Exported optimized snippet"
                 lastErrorMessage = nil
-                reconcile(assets: [record] + assets, profiles: profiles)
             } catch {
                 lastErrorMessage = "Snippet export failed: \(error.localizedDescription)"
             }

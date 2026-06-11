@@ -1,3 +1,4 @@
+import MacWallpaperEngineCore
 import SwiftUI
 
 struct FPSCapControl: View {
@@ -7,7 +8,7 @@ struct FPSCapControl: View {
 
     @State private var typedValue = ""
 
-    private let presets = [0, 15, 24, 30, 60, 90, 120]
+    private let presets = [0, 15, 24, 30, 60, 90, 120, 144, 165, 240, 360, 500]
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -81,6 +82,6 @@ struct FPSCapControl: View {
             return 0
         }
 
-        return min(max(1, value), 240)
+        return PlaybackFrameRateCompensation.clampedTargetFPS(value)
     }
 }

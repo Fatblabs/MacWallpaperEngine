@@ -25,6 +25,93 @@ public enum WallpaperAppearance: String, Codable, Equatable, Sendable {
     case dark
 }
 
+public enum WallpaperCanvasResolutionMode: String, CaseIterable, Codable, Equatable, Sendable {
+    case autoNative
+    case fourK
+    case qhd1440p
+    case fhd1080p
+    case customAspect
+}
+
+public struct WallpaperCanvasResolution: Codable, Equatable, Sendable {
+    public var mode: WallpaperCanvasResolutionMode
+    public var customAspectWidth: Double
+    public var customAspectHeight: Double
+
+    public init(
+        mode: WallpaperCanvasResolutionMode = .autoNative,
+        customAspectWidth: Double = 16,
+        customAspectHeight: Double = 9
+    ) {
+        self.mode = mode
+        self.customAspectWidth = customAspectWidth
+        self.customAspectHeight = customAspectHeight
+    }
+
+    public static let auto = WallpaperCanvasResolution()
+    public static let fourK = WallpaperCanvasResolution(mode: .fourK)
+    public static let qhd1440p = WallpaperCanvasResolution(mode: .qhd1440p)
+    public static let fhd1080p = WallpaperCanvasResolution(mode: .fhd1080p)
+
+    public var displayTitle: String {
+        switch mode {
+        case .autoNative:
+            "Auto / Native"
+        case .fourK:
+            "4K"
+        case .qhd1440p:
+            "1440p"
+        case .fhd1080p:
+            "1080p"
+        case .customAspect:
+            "Custom \(formatted(customAspectWidth)):\(formatted(customAspectHeight))"
+        }
+    }
+
+    public var pixelSize: (width: Int, height: Int)? {
+        switch mode {
+        case .autoNative, .customAspect:
+            nil
+        case .fourK:
+            (3_840, 2_160)
+        case .qhd1440p:
+            (2_560, 1_440)
+        case .fhd1080p:
+            (1_920, 1_080)
+        }
+    }
+
+    public func aspectRatio(fallbackWidth: Double, fallbackHeight: Double) -> Double {
+        switch mode {
+        case .autoNative:
+            guard fallbackWidth > 0, fallbackHeight > 0 else { return 16.0 / 9.0 }
+            return fallbackWidth / fallbackHeight
+        case .customAspect:
+            return sanitizedAspectWidth / sanitizedAspectHeight
+        case .fourK, .qhd1440p, .fhd1080p:
+            return 16.0 / 9.0
+        }
+    }
+
+    public func backingScale(forDisplayPixelSize displayPixelSize: (width: Double, height: Double)) -> Double? {
+        guard let pixelSize else { return nil }
+        guard displayPixelSize.width > 0, displayPixelSize.height > 0 else { return nil }
+        return min(1, max(0.25, min(Double(pixelSize.width) / displayPixelSize.width, Double(pixelSize.height) / displayPixelSize.height)))
+    }
+
+    private var sanitizedAspectWidth: Double {
+        min(max(customAspectWidth, 1), 64)
+    }
+
+    private var sanitizedAspectHeight: Double {
+        min(max(customAspectHeight, 1), 64)
+    }
+
+    private func formatted(_ value: Double) -> String {
+        value.formatted(.number.precision(.fractionLength(value.rounded() == value ? 0 : 1)))
+    }
+}
+
 public struct VideoTrimConfiguration: Codable, Equatable, Sendable {
     public static let longVideoThresholdSeconds: Double = 60
     public static let minimumOptimizedSnippetSeconds: Double = 30
@@ -509,6 +596,7 @@ public struct WallpaperEditorConfiguration: Codable, Equatable, Sendable {
     public var playbackSpeed: Double
     public var mouseInteraction: MouseInteractionConfiguration
     public var themeSync: ThemeSyncConfiguration
+    public var canvasResolution: WallpaperCanvasResolution
     public var customText: CustomTextConfiguration
     public var clockCalendar: ClockCalendarConfiguration
     public var widgets: [DesktopWidgetConfiguration]
@@ -522,6 +610,7 @@ public struct WallpaperEditorConfiguration: Codable, Equatable, Sendable {
         playbackSpeed: Double = 1,
         mouseInteraction: MouseInteractionConfiguration = MouseInteractionConfiguration(),
         themeSync: ThemeSyncConfiguration = ThemeSyncConfiguration(),
+        canvasResolution: WallpaperCanvasResolution = WallpaperCanvasResolution(),
         customText: CustomTextConfiguration = CustomTextConfiguration(),
         clockCalendar: ClockCalendarConfiguration = ClockCalendarConfiguration(),
         widgets: [DesktopWidgetConfiguration] = [],
@@ -534,6 +623,7 @@ public struct WallpaperEditorConfiguration: Codable, Equatable, Sendable {
         self.playbackSpeed = playbackSpeed
         self.mouseInteraction = mouseInteraction
         self.themeSync = themeSync
+        self.canvasResolution = canvasResolution
         self.customText = customText
         self.clockCalendar = clockCalendar
         self.widgets = widgets
@@ -558,6 +648,7 @@ public struct WallpaperEditorConfiguration: Codable, Equatable, Sendable {
         case playbackSpeed
         case mouseInteraction
         case themeSync
+        case canvasResolution
         case customText
         case clockCalendar
         case widgets
@@ -573,6 +664,7 @@ public struct WallpaperEditorConfiguration: Codable, Equatable, Sendable {
         playbackSpeed = try container.decodeIfPresent(Double.self, forKey: .playbackSpeed) ?? 1
         mouseInteraction = try container.decodeIfPresent(MouseInteractionConfiguration.self, forKey: .mouseInteraction) ?? MouseInteractionConfiguration()
         themeSync = try container.decodeIfPresent(ThemeSyncConfiguration.self, forKey: .themeSync) ?? ThemeSyncConfiguration()
+        canvasResolution = try container.decodeIfPresent(WallpaperCanvasResolution.self, forKey: .canvasResolution) ?? WallpaperCanvasResolution()
         customText = try container.decodeIfPresent(CustomTextConfiguration.self, forKey: .customText) ?? CustomTextConfiguration()
         clockCalendar = try container.decodeIfPresent(ClockCalendarConfiguration.self, forKey: .clockCalendar) ?? ClockCalendarConfiguration()
         widgets = try container.decodeIfPresent([DesktopWidgetConfiguration].self, forKey: .widgets) ?? []
@@ -588,6 +680,7 @@ public struct WallpaperEditorConfiguration: Codable, Equatable, Sendable {
         try container.encode(playbackSpeed, forKey: .playbackSpeed)
         try container.encode(mouseInteraction, forKey: .mouseInteraction)
         try container.encode(themeSync, forKey: .themeSync)
+        try container.encode(canvasResolution, forKey: .canvasResolution)
         try container.encode(customText, forKey: .customText)
         try container.encode(clockCalendar, forKey: .clockCalendar)
         try container.encode(widgets, forKey: .widgets)

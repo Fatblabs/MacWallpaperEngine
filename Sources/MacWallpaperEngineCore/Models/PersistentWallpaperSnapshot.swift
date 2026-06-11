@@ -4,36 +4,51 @@ public struct WallpaperAssetRestoreMetadata: Codable, Equatable, Sendable, Ident
     public var id: UUID
     public var displayName: String
     public var originalFilename: String
+    public var bookmarkData: Data?
     public var lastKnownPath: String
     public var duration: Double
     public var pixelWidth: Int
     public var pixelHeight: Int
     public var codecSummary: String
     public var posterFrameFilename: String?
+    public var editorConfigurationData: Data?
     public var editorFingerprint: String
 
     public init(
         id: UUID,
         displayName: String,
         originalFilename: String,
+        bookmarkData: Data? = nil,
         lastKnownPath: String,
         duration: Double,
         pixelWidth: Int,
         pixelHeight: Int,
         codecSummary: String,
         posterFrameFilename: String?,
+        editorConfigurationData: Data? = nil,
         editorFingerprint: String
     ) {
         self.id = id
         self.displayName = displayName
         self.originalFilename = originalFilename
+        self.bookmarkData = bookmarkData
         self.lastKnownPath = lastKnownPath
         self.duration = duration
         self.pixelWidth = pixelWidth
         self.pixelHeight = pixelHeight
         self.codecSummary = codecSummary
         self.posterFrameFilename = posterFrameFilename
+        self.editorConfigurationData = editorConfigurationData
         self.editorFingerprint = editorFingerprint
+    }
+
+    public var editorConfiguration: WallpaperEditorConfiguration {
+        guard let editorConfigurationData,
+              let decoded = try? JSONDecoder().decode(WallpaperEditorConfiguration.self, from: editorConfigurationData) else {
+            return .default
+        }
+
+        return decoded
     }
 }
 

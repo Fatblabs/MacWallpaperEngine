@@ -67,7 +67,11 @@ struct MenuBarView: View {
         .padding()
         .frame(width: 320)
         .onAppear {
-            appState.reconcile(assets: assets, profiles: profiles)
+            if assets.isEmpty {
+                appState.bootstrapFromStore(modelContext: modelContext)
+            } else {
+                appState.reconcile(assets: assets, profiles: profiles)
+            }
         }
     }
 }

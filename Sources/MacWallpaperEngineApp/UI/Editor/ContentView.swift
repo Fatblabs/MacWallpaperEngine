@@ -51,6 +51,9 @@ struct ContentView: View {
         )
         .toolbar {
             ContentToolbar(
+                selectedAsset: selectedAsset,
+                assets: assets,
+                profiles: profiles,
                 columnVisibility: $columnVisibility,
                 modelContext: modelContext
             )
@@ -69,8 +72,10 @@ struct ContentView: View {
             isDropTargeted = isTargeted
         }
         .onAppear {
-            selectedAssetID = selectedAsset?.id
-            appState.reconcile(assets: assets, profiles: profiles)
+            if selectedAssetID == nil {
+                selectedAssetID = selectedAsset?.id
+            }
+            appState.start()
         }
         .onChange(of: assetIDs) {
             if selectedAsset == nil {
@@ -107,7 +112,7 @@ private struct ContentWorkspace: View {
                 selectedAssetID: $selectedAssetID,
                 isDropTargeted: $isDropTargeted
             )
-            .navigationSplitViewColumnWidth(min: 230, ideal: 270, max: 330)
+            .navigationSplitViewColumnWidth(min: 210, ideal: 250, max: 320)
         } content: {
             CenterCanvasWorkspace(
                 selectedAsset: selectedAsset,
@@ -115,50 +120,15 @@ private struct ContentWorkspace: View {
                 profiles: profiles,
                 selectedWidgetID: $selectedWidgetID
             )
-            .navigationSplitViewColumnWidth(min: 520, ideal: 760)
+            .navigationSplitViewColumnWidth(min: 480, ideal: 780)
         } detail: {
             InspectorSidebar(
                 selectedAsset: selectedAsset,
                 assets: assets,
                 profiles: profiles,
-                selectedAssetID: $selectedAssetID,
                 selectedWidgetID: $selectedWidgetID
             )
-            .navigationSplitViewColumnWidth(min: 300, ideal: 360, max: 460)
-        }
-    }
-}
-
-private struct ContentToolbar: ToolbarContent {
-    @EnvironmentObject private var appState: AppState
-
-    @Binding var columnVisibility: NavigationSplitViewVisibility
-    let modelContext: ModelContext
-
-    var body: some ToolbarContent {
-        ToolbarItemGroup {
-            Button {
-                appState.chooseVideo(modelContext: modelContext)
-            } label: {
-                Label("Choose Video", systemImage: "plus")
-            }
-
-            Button {
-                appState.toggleManualPause()
-            } label: {
-                Label(appState.isManuallyPaused ? "Resume" : "Pause", systemImage: appState.isManuallyPaused ? "play.fill" : "pause.fill")
-            }
-
-            Toggle(isOn: $appState.isEditModeEnabled) {
-                Label("Edit Wallpaper", systemImage: "slider.horizontal.3")
-            }
-            .toggleStyle(.button)
-
-            Button {
-                columnVisibility = columnVisibility == .all ? .doubleColumn : .all
-            } label: {
-                Label("Inspector", systemImage: "sidebar.right")
-            }
+            .navigationSplitViewColumnWidth(min: 340, ideal: 400, max: 520)
         }
     }
 }
@@ -178,12 +148,24 @@ private struct MasterLibrarySidebar: View {
                 Text("Library")
                     .font(.title2.weight(.semibold))
                 Spacer()
-                Button {
-                    appState.chooseVideo(modelContext: modelContext)
-                } label: {
-                    Image(systemName: "plus")
+                HStack(spacing: 6) {
+                    Button {
+                        appState.chooseVideo(modelContext: modelContext)
+                    } label: {
+                        Image(systemName: "plus")
+                            .frame(width: 26, height: 20)
+                    }
+                    .help("Choose local videos")
+
+                    Button(role: .destructive) {
+                        removeSelected()
+                    } label: {
+                        Image(systemName: "minus")
+                            .frame(width: 26, height: 20)
+                    }
+                    .disabled(selectedAsset == nil)
+                    .help("Remove selected wallpaper")
                 }
-                .help("Choose local videos")
             }
             .padding([.top, .horizontal], 14)
 
@@ -218,6 +200,20 @@ private struct MasterLibrarySidebar: View {
                 .listStyle(.sidebar)
             }
         }
+    }
+
+    private var selectedAsset: WallpaperAssetRecord? {
+        if let selectedAssetID,
+           let selected = assets.first(where: { $0.id == selectedAssetID }) {
+            return selected
+        }
+
+        return assets.first
+    }
+
+    private func removeSelected() {
+        guard let selectedAsset else { return }
+        remove(selectedAsset)
     }
 
     private func remove(_ asset: WallpaperAssetRecord) {
@@ -274,13 +270,15 @@ private struct CenterCanvasWorkspace: View {
 
     var body: some View {
         if let selectedAsset {
-            VSplitView {
+            VStack(spacing: 14) {
                 LivePreviewPane(
                     asset: selectedAsset,
                     configuration: selectedAsset.editorConfiguration,
                     selectedWidgetID: $selectedWidgetID
                 )
-                .frame(minHeight: 300)
+                .aspectRatio(previewAspect(for: selectedAsset), contentMode: .fit)
+                .frame(maxWidth: .infinity)
+                .frame(maxHeight: 360, alignment: .top)
 
                 ContextualLowerPane(
                     asset: selectedAsset,
@@ -288,9 +286,13 @@ private struct CenterCanvasWorkspace: View {
                     profiles: profiles,
                     selectedWidgetID: $selectedWidgetID
                 )
-                .frame(minHeight: 190, idealHeight: 260)
+                .frame(maxWidth: .infinity)
+                .frame(minHeight: 160, idealHeight: 220, maxHeight: 280)
+
+                Spacer(minLength: 0)
             }
             .padding(14)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         } else {
             ContentUnavailableView(
                 "No Wallpaper Selected",
@@ -298,6 +300,15 @@ private struct CenterCanvasWorkspace: View {
                 description: Text("Import or select a local video from the library.")
             )
         }
+    }
+
+    private func previewAspect(for asset: WallpaperAssetRecord) -> CGFloat {
+        CGFloat(
+            asset.editorConfiguration.canvasResolution.aspectRatio(
+                fallbackWidth: Double(max(1, asset.pixelWidth)),
+                fallbackHeight: Double(max(1, asset.pixelHeight))
+            )
+        )
     }
 }
 
@@ -347,6 +358,9 @@ private struct LivePreviewPane: View {
                             .font(.headline)
                         Text(configuration.playlist.isMultiVideo ? "Playlist · \(configuration.playlist.assetIDs.count) videos" : "Single video")
                             .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Text(configuration.canvasResolution.displayTitle)
+                            .font(.caption2)
                             .foregroundStyle(.secondary)
                     }
                     Spacer()
@@ -581,16 +595,32 @@ private struct QuickFlowPane: View {
     @Binding var selectedWidgetID: UUID?
 
     var body: some View {
-        HStack(spacing: 14) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Ready to Customize")
-                    .font(.headline)
-                Text("Use the inspector to tune color, widgets, playlist order, and performance settings.")
-                    .foregroundStyle(.secondary)
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 14) {
+                prompt
+                Spacer(minLength: 12)
+                actions
             }
 
-            Spacer()
+            VStack(alignment: .leading, spacing: 10) {
+                prompt
+                actions
+            }
+        }
+    }
 
+    private var prompt: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("Ready to Customize")
+                .font(.headline)
+            Text("Use the inspector to tune color, widgets, playlist order, and performance settings.")
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private var actions: some View {
+        HStack(spacing: 10) {
             Button("Create Playlist") {
                 appState.updateEditorConfiguration(for: asset, assets: assets, profiles: profiles, modelContext: modelContext) { configuration in
                     var ids = [asset.id]
@@ -623,61 +653,182 @@ private struct InspectorSidebar: View {
     let selectedAsset: WallpaperAssetRecord?
     let assets: [WallpaperAssetRecord]
     let profiles: [DisplayProfileRecord]
-    @Binding var selectedAssetID: UUID?
     @Binding var selectedWidgetID: UUID?
+    @State private var selectedTab: InspectorDockTab = .layers
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 14) {
-                if let selectedAsset {
-                    InspectorHeader(asset: selectedAsset)
-                    Button(role: .destructive) {
-                        selectedWidgetID = nil
-                        selectedAssetID = assets.first { $0.id != selectedAsset.id }?.id
-                        appState.removeWallpaper(selectedAsset, assets: assets, profiles: profiles, modelContext: modelContext)
-                    } label: {
-                        Label("Remove Wallpaper", systemImage: "trash")
-                    }
-                    .buttonStyle(.bordered)
+        HStack(spacing: 0) {
+            InspectorIconDock(selection: $selectedTab, selectedWidgetID: $selectedWidgetID)
+                .frame(width: 54)
 
-                    PerformanceInspectorSection()
-                    WidgetLayerInspector(
-                        asset: selectedAsset,
-                        assets: assets,
-                        profiles: profiles,
-                        selectedWidgetID: $selectedWidgetID
-                    )
+            Divider()
 
-                    if selectedWidgetID == nil {
-                        WallpaperControlsInspector(asset: selectedAsset, assets: assets, profiles: profiles)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    if let selectedAsset {
+                        InspectorHeader(asset: selectedAsset, title: panelTitle)
+                        panelContent(for: selectedAsset)
                     } else {
-                        SelectedWidgetInspector(
-                            asset: selectedAsset,
-                            assets: assets,
-                            profiles: profiles,
-                            selectedWidgetID: $selectedWidgetID
-                        )
+                        ContentUnavailableView("Inspector", systemImage: "sidebar.right", description: Text("Select a wallpaper to edit."))
+                            .frame(maxWidth: .infinity, minHeight: 260)
                     }
-                } else {
-                    ContentUnavailableView("Inspector", systemImage: "sidebar.right", description: Text("Select a wallpaper to edit."))
                 }
+                .padding(14)
+                .frame(maxWidth: .infinity, alignment: .topLeading)
             }
-            .padding(14)
+        }
+        .transaction { transaction in
+            transaction.animation = nil
+        }
+        .onChange(of: selectedWidgetID) {
+            if selectedWidgetID != nil {
+                selectedTab = .layers
+            }
         }
     }
+
+    private var panelTitle: String {
+        if selectedWidgetID != nil {
+            return "Widget"
+        }
+
+        return selectedTab.title
+    }
+
+    @ViewBuilder
+    private func panelContent(for asset: WallpaperAssetRecord) -> some View {
+        if selectedWidgetID != nil {
+            SelectedWidgetInspector(
+                asset: asset,
+                assets: assets,
+                profiles: profiles,
+                selectedWidgetID: $selectedWidgetID
+            )
+        } else {
+            let configuration = configurationBinding(for: asset)
+            switch selectedTab {
+            case .layers:
+                WidgetLayerInspector(
+                    asset: asset,
+                    assets: assets,
+                    profiles: profiles,
+                    selectedWidgetID: $selectedWidgetID
+                )
+                LayerEditorSection(configuration: configuration)
+                PlaybackEditorSection(configuration: configuration)
+            case .text:
+                TextEditorSection(configuration: configuration)
+                ClockCalendarEditorSection(configuration: configuration)
+            case .effects:
+                ColorEditorSection(configuration: configuration)
+                InteractionEditorSection(configuration: configuration)
+            case .settings:
+                PerformanceInspectorSection()
+                ThemeSyncEditorSection(assets: assets, configuration: configuration)
+            }
+        }
+    }
+
+    private func configurationBinding(for asset: WallpaperAssetRecord) -> Binding<WallpaperEditorConfiguration> {
+        Binding {
+            asset.editorConfiguration
+        } set: { newValue in
+            appState.updateEditorConfiguration(for: asset, assets: assets, profiles: profiles, modelContext: modelContext) { configuration in
+                configuration = newValue
+            }
+        }
+    }
+
 }
 
 private struct InspectorHeader: View {
     let asset: WallpaperAssetRecord
+    let title: String
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text("Inspector")
+            Text(title)
                 .font(.title2.weight(.semibold))
             Text(asset.displayName)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
         }
+    }
+}
+
+private enum InspectorDockTab: String, CaseIterable, Identifiable {
+    case layers
+    case text
+    case effects
+    case settings
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .layers:
+            "Layers"
+        case .text:
+            "Text"
+        case .effects:
+            "Effects"
+        case .settings:
+            "Settings"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .layers:
+            "square.3.layers.3d"
+        case .text:
+            "textformat"
+        case .effects:
+            "wand.and.stars"
+        case .settings:
+            "gearshape"
+        }
+    }
+}
+
+private struct InspectorIconDock: View {
+    @Binding var selection: InspectorDockTab
+    @Binding var selectedWidgetID: UUID?
+
+    var body: some View {
+        VStack(spacing: 8) {
+            ForEach(InspectorDockTab.allCases) { tab in
+                Button {
+                    var transaction = Transaction()
+                    transaction.disablesAnimations = true
+                    withTransaction(transaction) {
+                        selection = tab
+                        if tab != .layers {
+                            selectedWidgetID = nil
+                        }
+                    }
+                } label: {
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 9)
+                            .fill(selection == tab ? .blue.opacity(0.16) : .clear)
+                        Image(systemName: tab.systemImage)
+                            .font(.system(size: 17, weight: .semibold))
+                            .foregroundStyle(selection == tab ? .blue : .secondary)
+                    }
+                    .frame(width: 44, height: 44)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .frame(width: 44, height: 44)
+                .help(tab.title)
+            }
+
+            Spacer(minLength: 0)
+        }
+        .padding(.vertical, 12)
+        .frame(maxHeight: .infinity)
+        .background(.quaternary.opacity(0.35))
+        .animation(nil, value: selection)
     }
 }
 
@@ -778,37 +929,6 @@ private struct WidgetLayerInspector: View {
     }
 }
 
-private struct WallpaperControlsInspector: View {
-    @Environment(\.modelContext) private var modelContext
-    @EnvironmentObject private var appState: AppState
-
-    let asset: WallpaperAssetRecord
-    let assets: [WallpaperAssetRecord]
-    let profiles: [DisplayProfileRecord]
-
-    var body: some View {
-        let configuration = configurationBinding
-        Group {
-            ColorEditorSection(configuration: configuration)
-            PlaybackEditorSection(configuration: configuration)
-            LayerEditorSection(configuration: configuration)
-            TextEditorSection(configuration: configuration)
-            InteractionEditorSection(configuration: configuration)
-            ThemeSyncEditorSection(assets: assets, configuration: configuration)
-        }
-    }
-
-    private var configurationBinding: Binding<WallpaperEditorConfiguration> {
-        Binding {
-            asset.editorConfiguration
-        } set: { newValue in
-            appState.updateEditorConfiguration(for: asset, assets: assets, profiles: profiles, modelContext: modelContext) { configuration in
-                configuration = newValue
-            }
-        }
-    }
-}
-
 private struct SelectedWidgetInspector: View {
     @Environment(\.modelContext) private var modelContext
     @EnvironmentObject private var appState: AppState
@@ -848,20 +968,21 @@ private struct SelectedWidgetInspector: View {
     }
 
     private func widgetNameBinding(_ id: UUID) -> Binding<String> {
-        widgetBinding(id, get: \.name) { $0.name = $1 }
+        widgetBinding(id, fallback: widget?.name ?? "", get: \.name) { $0.name = $1 }
     }
 
     private func widgetVisibilityBinding(_ id: UUID) -> Binding<Bool> {
-        widgetBinding(id, get: \.isVisible) { $0.isVisible = $1 }
+        widgetBinding(id, fallback: widget?.isVisible ?? false, get: \.isVisible) { $0.isVisible = $1 }
     }
 
     private func widgetBinding<Value>(
         _ id: UUID,
+        fallback: Value,
         get: @escaping (DesktopWidgetConfiguration) -> Value,
         set: @escaping (inout DesktopWidgetConfiguration, Value) -> Void
     ) -> Binding<Value> {
         Binding {
-            asset.editorConfiguration.widgets.first { $0.id == id }.map(get)!
+            asset.editorConfiguration.widgets.first { $0.id == id }.map(get) ?? fallback
         } set: { value in
             appState.updateEditorConfiguration(for: asset, assets: assets, profiles: profiles, modelContext: modelContext) { configuration in
                 guard let index = configuration.widgets.firstIndex(where: { $0.id == id }) else { return }
@@ -887,18 +1008,19 @@ private struct ClockWidgetInspector: View {
     @EnvironmentObject private var appState: AppState
 
     var body: some View {
-        Toggle("Show time", isOn: binding(\.clock.showTime) { $0.clock.showTime = $1 })
-        Toggle("Show date", isOn: binding(\.clock.showDate) { $0.clock.showDate = $1 })
-        Toggle("24-hour time", isOn: binding(\.clock.use24HourClock) { $0.clock.use24HourClock = $1 })
-        InstalledFontPicker("Font", selection: binding(\.style.fontName) { $0.style.fontName = $1 })
+        Toggle("Show time", isOn: binding(\.clock.showTime, fallback: true) { $0.clock.showTime = $1 })
+        Toggle("Show date", isOn: binding(\.clock.showDate, fallback: false) { $0.clock.showDate = $1 })
+        Toggle("24-hour time", isOn: binding(\.clock.use24HourClock, fallback: false) { $0.clock.use24HourClock = $1 })
+        InstalledFontPicker("Font", selection: binding(\.style.fontName, fallback: "Helvetica Neue") { $0.style.fontName = $1 })
     }
 
     private func binding<Value>(
         _ keyPath: KeyPath<DesktopWidgetConfiguration, Value>,
+        fallback: Value,
         _ setter: @escaping (inout DesktopWidgetConfiguration, Value) -> Void
     ) -> Binding<Value> {
         Binding {
-            asset.editorConfiguration.widgets.first { $0.id == widgetID }![keyPath: keyPath]
+            asset.editorConfiguration.widgets.first { $0.id == widgetID }?[keyPath: keyPath] ?? fallback
         } set: { value in
             appState.updateEditorConfiguration(for: asset, assets: assets, profiles: profiles, modelContext: modelContext) { configuration in
                 guard let index = configuration.widgets.firstIndex(where: { $0.id == widgetID }) else { return }
@@ -917,9 +1039,9 @@ private struct HardwareMonitorInspector: View {
     @EnvironmentObject private var appState: AppState
 
     var body: some View {
-        Toggle("Show CPU", isOn: binding(\.hardwareMonitor.showCPU) { $0.hardwareMonitor.showCPU = $1 })
-        Toggle("Show RAM", isOn: binding(\.hardwareMonitor.showRAM) { $0.hardwareMonitor.showRAM = $1 })
-        Picker("Graph style", selection: binding(\.hardwareMonitor.graphStyle) { $0.hardwareMonitor.graphStyle = $1 }) {
+        Toggle("Show CPU", isOn: binding(\.hardwareMonitor.showCPU, fallback: true) { $0.hardwareMonitor.showCPU = $1 })
+        Toggle("Show RAM", isOn: binding(\.hardwareMonitor.showRAM, fallback: true) { $0.hardwareMonitor.showRAM = $1 })
+        Picker("Graph style", selection: binding(\.hardwareMonitor.graphStyle, fallback: .compactText) { $0.hardwareMonitor.graphStyle = $1 }) {
             ForEach(HardwareGraphStyle.allCases, id: \.self) { style in
                 Text(style.rawValue.capitalized).tag(style)
             }
@@ -928,10 +1050,11 @@ private struct HardwareMonitorInspector: View {
 
     private func binding<Value>(
         _ keyPath: KeyPath<DesktopWidgetConfiguration, Value>,
+        fallback: Value,
         _ setter: @escaping (inout DesktopWidgetConfiguration, Value) -> Void
     ) -> Binding<Value> {
         Binding {
-            asset.editorConfiguration.widgets.first { $0.id == widgetID }![keyPath: keyPath]
+            asset.editorConfiguration.widgets.first { $0.id == widgetID }?[keyPath: keyPath] ?? fallback
         } set: { value in
             appState.updateEditorConfiguration(for: asset, assets: assets, profiles: profiles, modelContext: modelContext) { configuration in
                 guard let index = configuration.widgets.firstIndex(where: { $0.id == widgetID }) else { return }
@@ -950,8 +1073,8 @@ private struct WeatherInspector: View {
     @EnvironmentObject private var appState: AppState
 
     var body: some View {
-        TextField("Location label", text: binding(\.weather.locationLabel) { $0.weather.locationLabel = $1 })
-        Toggle("Use Celsius", isOn: binding(\.weather.useCelsius) { $0.weather.useCelsius = $1 })
+        TextField("Location label", text: binding(\.weather.locationLabel, fallback: "Local Weather") { $0.weather.locationLabel = $1 })
+        Toggle("Use Celsius", isOn: binding(\.weather.useCelsius, fallback: false) { $0.weather.useCelsius = $1 })
         Text("Weather remains offline until a provider is explicitly configured.")
             .font(.caption)
             .foregroundStyle(.secondary)
@@ -959,10 +1082,11 @@ private struct WeatherInspector: View {
 
     private func binding<Value>(
         _ keyPath: KeyPath<DesktopWidgetConfiguration, Value>,
+        fallback: Value,
         _ setter: @escaping (inout DesktopWidgetConfiguration, Value) -> Void
     ) -> Binding<Value> {
         Binding {
-            asset.editorConfiguration.widgets.first { $0.id == widgetID }![keyPath: keyPath]
+            asset.editorConfiguration.widgets.first { $0.id == widgetID }?[keyPath: keyPath] ?? fallback
         } set: { value in
             appState.updateEditorConfiguration(for: asset, assets: assets, profiles: profiles, modelContext: modelContext) { configuration in
                 guard let index = configuration.widgets.firstIndex(where: { $0.id == widgetID }) else { return }
@@ -981,29 +1105,30 @@ private struct WidgetStyleInspector: View {
     @EnvironmentObject private var appState: AppState
 
     var body: some View {
-        Picker("Anchor", selection: binding(\.layout.anchor) { $0.layout.anchor = $1 }) {
+        Picker("Anchor", selection: binding(\.layout.anchor, fallback: .topRight) { $0.layout.anchor = $1 }) {
             ForEach(WidgetAnchor.allCases, id: \.self) { anchor in
                 Text(anchor.rawValue.capitalized).tag(anchor)
             }
         }
-        Toggle("Lock to anchor", isOn: binding(\.layout.isAnchorLocked) { $0.layout.isAnchorLocked = $1 })
-        InstalledFontPicker("Font", selection: binding(\.style.fontName) { $0.style.fontName = $1 })
-        TuningSlider("X", value: binding(\.layout.x) { $0.layout.x = $1 }, range: 0...3_840, suffix: "px")
-        TuningSlider("Y", value: binding(\.layout.y) { $0.layout.y = $1 }, range: 0...2_160, suffix: "px")
-        TuningSlider("Scale", value: binding(\.style.scale) { $0.style.scale = $1 }, range: 0.5...2.5, suffix: "x")
-        TuningSlider("Opacity", value: binding(\.style.opacity) { $0.style.opacity = $1 }, range: 0...1, suffix: "")
+        Toggle("Lock to anchor", isOn: binding(\.layout.isAnchorLocked, fallback: true) { $0.layout.isAnchorLocked = $1 })
+        InstalledFontPicker("Font", selection: binding(\.style.fontName, fallback: "Helvetica Neue") { $0.style.fontName = $1 })
+        TuningSlider("X", value: binding(\.layout.x, fallback: 32) { $0.layout.x = $1 }, range: 0...3_840, suffix: "px")
+        TuningSlider("Y", value: binding(\.layout.y, fallback: 32) { $0.layout.y = $1 }, range: 0...2_160, suffix: "px")
+        TuningSlider("Scale", value: binding(\.style.scale, fallback: 1) { $0.style.scale = $1 }, range: 0.5...2.5, suffix: "x")
+        TuningSlider("Opacity", value: binding(\.style.opacity, fallback: 1) { $0.style.opacity = $1 }, range: 0...1, suffix: "")
         ColorPicker("Foreground", selection: colorBinding(\.style.foregroundColor) { $0.style.foregroundColor = $1 })
         ColorPicker("Shadow", selection: colorBinding(\.style.shadowColor) { $0.style.shadowColor = $1 })
-        TuningSlider("Shadow radius", value: binding(\.style.shadowRadius) { $0.style.shadowRadius = $1 }, range: 0...24, suffix: "px")
-        TuningSlider("Refresh", value: binding(\.refresh.intervalSeconds) { $0.refresh.intervalSeconds = $1 }, range: 1...3_600, suffix: "s")
+        TuningSlider("Shadow radius", value: binding(\.style.shadowRadius, fallback: 8) { $0.style.shadowRadius = $1 }, range: 0...24, suffix: "px")
+        TuningSlider("Refresh", value: binding(\.refresh.intervalSeconds, fallback: 1) { $0.refresh.intervalSeconds = $1 }, range: 1...3_600, suffix: "s")
     }
 
     private func binding<Value>(
         _ keyPath: KeyPath<DesktopWidgetConfiguration, Value>,
+        fallback: Value,
         _ setter: @escaping (inout DesktopWidgetConfiguration, Value) -> Void
     ) -> Binding<Value> {
         Binding {
-            asset.editorConfiguration.widgets.first { $0.id == widgetID }![keyPath: keyPath]
+            asset.editorConfiguration.widgets.first { $0.id == widgetID }?[keyPath: keyPath] ?? fallback
         } set: { value in
             appState.updateEditorConfiguration(for: asset, assets: assets, profiles: profiles, modelContext: modelContext) { configuration in
                 guard let index = configuration.widgets.firstIndex(where: { $0.id == widgetID }) else { return }
@@ -1017,7 +1142,7 @@ private struct WidgetStyleInspector: View {
         _ setter: @escaping (inout DesktopWidgetConfiguration, WidgetColor) -> Void
     ) -> Binding<Color> {
         Binding {
-            let widgetColor = asset.editorConfiguration.widgets.first { $0.id == widgetID }![keyPath: keyPath]
+            let widgetColor = asset.editorConfiguration.widgets.first { $0.id == widgetID }?[keyPath: keyPath] ?? .white
             return Color(
                 red: widgetColor.red,
                 green: widgetColor.green,

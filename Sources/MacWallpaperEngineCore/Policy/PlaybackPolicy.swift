@@ -29,6 +29,28 @@ public enum PlaybackMode: Codable, Equatable, Sendable {
     case paused(reason: PauseReason)
 }
 
+public enum PlaybackFrameRateCompensation {
+    public static let maximumSupportedFPS = 500
+    public static let maximumPlaybackMultiplier: Double = 32
+
+    public static func clampedTargetFPS(_ fps: Int) -> Int {
+        min(max(1, fps), maximumSupportedFPS)
+    }
+
+    public static func multiplier(sourceFPS: Double, targetFPS: Int) -> Double {
+        guard sourceFPS.isFinite, sourceFPS > 0 else {
+            return 1
+        }
+
+        let target = Double(clampedTargetFPS(targetFPS))
+        guard target > sourceFPS else {
+            return 1
+        }
+
+        return min(maximumPlaybackMultiplier, target / sourceFPS)
+    }
+}
+
 public struct PlaybackPolicy: Codable, Equatable, Sendable {
     public var pauseWhenCovered: Bool
     public var pauseDuringFullscreenApps: Bool
@@ -147,11 +169,11 @@ public final class PlaybackPolicyEngine {
         }
 
         if policy.reduceOnBattery && context.powerSource == .battery {
-            return .capped(fps: max(1, policy.batteryFPSCap))
+            return .capped(fps: PlaybackFrameRateCompensation.clampedTargetFPS(policy.batteryFPSCap))
         }
 
         if let normalFPSCap = policy.normalFPSCap {
-            return .capped(fps: max(1, normalFPSCap))
+            return .capped(fps: PlaybackFrameRateCompensation.clampedTargetFPS(normalFPSCap))
         }
 
         return .full

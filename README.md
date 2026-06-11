@@ -6,30 +6,30 @@ The v1 implementation focuses on the important bits first:
 
 - local MP4/MOV/M4V and other QuickTime-playable video imports
 - drag-and-drop and Finder file picker import
-- visible wallpaper removal from the library context menu and inspector
+- visible wallpaper removal beside the Library add button and from the library context menu
+- toolbar canvas resolution presets for Auto/Native, 4K, 1440p, 1080p, and custom aspect ratios
 - one wallpaper window per display
 - AVFoundation playback for low overhead
 - intelligent pausing for covered desktops, full-screen apps, battery, Low Power Mode, and thermal pressure
 - menu bar controls plus a SwiftUI settings window
 - a wallpaper creator for trimming long videos, tuning color, changing playback speed, toggling composition layers, adding text, and configuring clock/calendar widgets
-- a unified three-panel editor: library sidebar, live-preview canvas with contextual lower pane, and collapsible inspector
+- a unified three-panel editor: library sidebar, adaptive live-preview canvas with contextual lower pane, and Canva-like modular inspector
 - playlist ordering with AVQueuePlayer-backed playback and crossfade transition composition
 - modular widget runtime for Clock, Hardware Monitor, and Weather modules that can load, update, swap, and unload without restarting wallpaper playback
 - light/dark and time-of-day wallpaper variant switching
-- UserDefaults-backed restoration snapshot for the last active wallpapers and display assignments, with immediate background window setup and alpha-fade video restoration
+- pinned Application Support SwiftData store plus restore snapshot, mirrored to UserDefaults, with bookmarks, editor settings, display assignments, immediate background window setup, and alpha-fade video restoration
 
 ## Wallpaper Creator
 
-Open the app and select an imported wallpaper in the left library. The center pane shows a live preview on top and a contextual workspace below, while the right inspector holds all customization controls:
+Open the app and select an imported wallpaper in the left library. The center pane shows an adaptive live preview on top and a contextual workspace below, while the right inspector uses a thin icon dock for focused modules:
 
 - videos 60 seconds or longer get a dual-handle snippet slider capped to a 30-60 second optimized range
 - optimized snippets can be exported locally with AVFoundation
 - multi-video wallpapers switch the lower pane into a drag-and-drop playlist order editor
-- hue, saturation, brightness, contrast, blur, and icon-readability tint
-- playback speed from calm slow loops to faster animation
-- component toggles for the video layer, ambient fog, moving clouds, foreground vignette, custom text, and widgets
-- cursor-follow particles, parallax depth, and click reactions
-- custom text using installed macOS fonts
+- Layers keeps component toggles, playlist/widget layer controls, and playback speed together
+- Text isolates custom text and clock/calendar typography controls
+- Effects contains color tuning, blur, tint, and interaction controls
+- Settings contains power policy and theme sync without duplicating add/remove actions
 - Clock, Hardware Monitor, and Weather widgets use one serialized schema with position, anchor locking, style, opacity, and refresh interval
 - selecting a widget changes the inspector instantly to that widget's specific controls
 - system Light/Dark or exact time-of-day wallpaper variants
@@ -62,6 +62,19 @@ That produces:
 dist/MacWallpaperEngine.app
 dist/MacWallpaperEngine-unsigned.zip
 ```
+
+## Source Layout
+
+The SwiftPM targets are organized by ownership:
+
+- `Sources/MacWallpaperEngineApp/App`: app entry point and scene setup
+- `Sources/MacWallpaperEngineApp/State`: app orchestration and launch restore flow
+- `Sources/MacWallpaperEngineApp/Persistence`: SwiftData records and restore cache
+- `Sources/MacWallpaperEngineApp/Rendering`: desktop windows, playback, display layout, and playlist composition
+- `Sources/MacWallpaperEngineApp/UI`: editor, menu bar, and reusable SwiftUI controls
+- `Sources/MacWallpaperEngineApp/System`: power, coverage, and launch-at-login integration
+- `Sources/MacWallpaperEngineApp/Widgets`: widget runtime and overlay configuration
+- `Sources/MacWallpaperEngineCore`: platform-light models, policies, and geometry helpers
 
 ## Build
 

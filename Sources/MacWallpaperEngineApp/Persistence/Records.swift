@@ -16,6 +16,8 @@ final class WallpaperAssetRecord {
     var posterFrameFilename: String?
     @Attribute(.externalStorage) var editorConfigurationData: Data?
     var createdAt: Date
+    @Transient private var cachedEditorConfigurationData: Data?
+    @Transient private var cachedEditorConfiguration: WallpaperEditorConfiguration?
 
     init(asset: WallpaperAsset) {
         self.id = asset.id
@@ -58,26 +60,62 @@ final class WallpaperAssetRecord {
 
     func resolvedURL() throws -> URL {
         var isStale = false
-        let url = try URL(
-            resolvingBookmarkData: bookmarkData,
-            options: [.withSecurityScope],
-            relativeTo: nil,
-            bookmarkDataIsStale: &isStale
-        )
+        do {
+            let url = try URL(
+                resolvingBookmarkData: bookmarkData,
+                options: [.withSecurityScope],
+                relativeTo: nil,
+                bookmarkDataIsStale: &isStale
+            )
+            if url.isFileURL {
+                return url
+            }
+        } catch {
+            if let fallbackURL = lastKnownFileURL {
+                return fallbackURL
+            }
+            throw error
+        }
+
+        if let fallbackURL = lastKnownFileURL {
+            return fallbackURL
+        }
+
+        return URL(fileURLWithPath: lastKnownPath)
+    }
+
+    private var lastKnownFileURL: URL? {
+        let url = URL(fileURLWithPath: lastKnownPath)
+        guard url.isFileURL,
+              FileManager.default.fileExists(atPath: url.path) else {
+            return nil
+        }
         return url
     }
 
     var editorConfiguration: WallpaperEditorConfiguration {
         get {
+            if cachedEditorConfigurationData == editorConfigurationData,
+               let cachedEditorConfiguration {
+                return cachedEditorConfiguration
+            }
+
             guard let editorConfigurationData,
                   let decoded = try? JSONDecoder().decode(WallpaperEditorConfiguration.self, from: editorConfigurationData) else {
+                cachedEditorConfigurationData = editorConfigurationData
+                cachedEditorConfiguration = .default
                 return .default
             }
 
+            cachedEditorConfigurationData = editorConfigurationData
+            cachedEditorConfiguration = decoded
             return decoded
         }
         set {
-            editorConfigurationData = try? JSONEncoder().encode(newValue)
+            let encoded = try? JSONEncoder().encode(newValue)
+            editorConfigurationData = encoded
+            cachedEditorConfigurationData = encoded
+            cachedEditorConfiguration = newValue
         }
     }
 
