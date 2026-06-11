@@ -155,6 +155,59 @@ struct WallpaperEditorConfigurationTests {
     }
 
     @Test
+    func smoothVideoExportPresetClampsToSupportedRefreshCeiling() {
+        let preset = SmoothVideoExportPreset(title: "Experimental", targetFPS: 1_000)
+
+        #expect(preset.normalizedTargetFPS == 500)
+        #expect(preset.exportLabel == "500fps Native")
+    }
+
+    @Test
+    func smoothVideoExportDimensionsPreserveAspectAndEvenPixelSize() {
+        let preset = SmoothVideoExportPreset(title: "4K", targetFPS: 120, maximumLongEdge: 3_840)
+
+        let dimensions = preset.outputDimensions(sourceWidth: 1_920, sourceHeight: 1_080)
+
+        #expect(dimensions == SmoothVideoExportDimensions(width: 3_840, height: 2_160))
+    }
+
+    @Test
+    func nativeSmoothVideoExportKeepsSourceSizeVideoEncoderFriendly() {
+        let preset = SmoothVideoExportPreset(title: "Native", targetFPS: 120)
+
+        let dimensions = preset.outputDimensions(sourceWidth: 1_279, sourceHeight: 719)
+
+        #expect(dimensions == SmoothVideoExportDimensions(width: 1_280, height: 720))
+    }
+
+    @Test
+    func customSmoothVideoExportUsesExactNormalizedDimensions() {
+        let preset = SmoothVideoExportPreset(
+            title: "Custom",
+            targetFPS: 144,
+            customDimensions: SmoothVideoExportDimensions(width: 2_333, height: 1_311)
+        )
+
+        let dimensions = preset.outputDimensions(sourceWidth: 1_920, sourceHeight: 1_080)
+
+        #expect(dimensions == SmoothVideoExportDimensions(width: 2_334, height: 1_312))
+        #expect(preset.exportLabel == "144fps 2334x1312")
+    }
+
+    @Test
+    func customSmoothVideoExportClampsOversizedDimensions() {
+        let preset = SmoothVideoExportPreset(
+            title: "Too Big",
+            targetFPS: 120,
+            customDimensions: SmoothVideoExportDimensions(width: 99_999, height: 8_001)
+        )
+
+        let dimensions = preset.outputDimensions(sourceWidth: 1_920, sourceHeight: 1_080)
+
+        #expect(dimensions == SmoothVideoExportDimensions(width: 7_680, height: 7_680))
+    }
+
+    @Test
     func removingWallpaperCleansPlaylistAndThemeReferences() {
         let removedID = UUID()
         let survivorID = UUID()

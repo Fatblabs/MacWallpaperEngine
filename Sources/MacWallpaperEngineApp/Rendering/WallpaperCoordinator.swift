@@ -5,6 +5,7 @@ import CoreImage
 import IOKit.ps
 import MacWallpaperEngineCore
 import os
+import QuartzCore
 
 @MainActor
 final class WallpaperCoordinator {
@@ -178,8 +179,10 @@ private final class WallpaperWindowController {
 
 @MainActor
 private final class VideoWallpaperView: NSView {
+    private let logger = Logger(subsystem: "MacWallpaperEngine", category: "VideoWallpaperView")
     private var queuePlayer: AVQueuePlayer?
     private var looper: AVPlayerLooper?
+    private var loopTemplateItem: AVPlayerItem?
     private var playlistItems: [WallpaperPlaylistItemConfiguration] = []
     private var playlistScopedURLs: [URL] = []
     private var playlistEndObserver: NSObjectProtocol?
@@ -202,6 +205,8 @@ private final class VideoWallpaperView: NSView {
     private var editorConfiguration = WallpaperEditorConfiguration.default
     private var lastPlaybackMode: PlaybackMode = .full
     private var sourceFrameRate: Double = 0
+    private var enqueueGeneration = 0
+    private var frameRateCappedItemIDs: Set<ObjectIdentifier> = []
     private var securityScopedURL: URL?
     private var securityScopeIsActive = false
 
@@ -249,6 +254,8 @@ private final class VideoWallpaperView: NSView {
     ) {
         stopSecurityScope()
         removePlaylistObserver()
+        enqueueGeneration += 1
+        let generation = enqueueGeneration
         self.layoutMode = layoutMode
         self.editorConfiguration = editorConfiguration
         self.playlistItems = playlistItems
@@ -257,6 +264,8 @@ private final class VideoWallpaperView: NSView {
             queuePlayer?.pause()
             queuePlayer = nil
             looper = nil
+            loopTemplateItem = nil
+            frameRateCappedItemIDs.removeAll()
             playerLayer?.removeFromSuperlayer()
             playerLayer = nil
             placeholderLayer.string = "Drop a local video to start"
@@ -280,7 +289,8 @@ private final class VideoWallpaperView: NSView {
         securityScopeIsActive = url.startAccessingSecurityScopedResource()
 
         let asset = AVURLAsset(url: url)
-        sourceFrameRate = nominalFrameRate(for: asset)
+        sourceFrameRate = 0
+        updateSourceFrameRate(for: asset, generation: generation)
         let item = AVPlayerItem(asset: asset)
         let player = AVQueuePlayer()
         player.isMuted = true
@@ -304,6 +314,8 @@ private final class VideoWallpaperView: NSView {
         playerLayer?.removeFromSuperlayer()
         self.queuePlayer = player
         self.looper = looper
+        self.loopTemplateItem = item
+        self.frameRateCappedItemIDs.removeAll()
         self.playerLayer = layer
         self.layer?.insertSublayer(layer, at: 0)
         showPlaceholder(false)
@@ -326,7 +338,8 @@ private final class VideoWallpaperView: NSView {
         securityScopeIsActive = false
 
         currentPlaylistIndex = min(max(0, editorConfiguration.playlist.currentIndex), items.count - 1)
-        sourceFrameRate = nominalFrameRate(for: AVURLAsset(url: items[currentPlaylistIndex].url))
+        sourceFrameRate = 0
+        updateSourceFrameRate(for: AVURLAsset(url: items[currentPlaylistIndex].url), generation: enqueueGeneration)
 
         let player = AVQueuePlayer()
         player.isMuted = true
@@ -341,6 +354,8 @@ private final class VideoWallpaperView: NSView {
         playerLayer?.removeFromSuperlayer()
         queuePlayer = player
         looper = nil
+        loopTemplateItem = nil
+        frameRateCappedItemIDs.removeAll()
         playerLayer = layer
         self.layer?.insertSublayer(layer, at: 0)
 
@@ -358,11 +373,13 @@ private final class VideoWallpaperView: NSView {
     }
 
     private func play(for mode: PlaybackMode) {
+        updateFrameRateCap(for: mode)
+
         switch mode {
         case .full:
-            queuePlayer?.playImmediately(atRate: effectivePlaybackRate(for: mode))
+            queuePlayer?.playImmediately(atRate: effectivePlaybackRate)
         case .capped:
-            queuePlayer?.playImmediately(atRate: effectivePlaybackRate(for: mode))
+            queuePlayer?.playImmediately(atRate: effectivePlaybackRate)
         case .posterFrame, .paused:
             queuePlayer?.pause()
         }
@@ -505,20 +522,35 @@ private final class VideoWallpaperView: NSView {
     private func enqueuePlaylistItems(startingAt startIndex: Int, minimumQueuedItems: Int) {
         guard let queuePlayer, !playlistItems.isEmpty else { return }
 
-        var queuedCount = queuePlayer.items().count
-        var nextIndex = (startIndex + queuedCount) % playlistItems.count
+        let generation = enqueueGeneration
+        let items = playlistItems
+        let crossfadeDuration = editorConfiguration.playlist.crossfadeDuration
 
-        while queuedCount < minimumQueuedItems {
-            let current = playlistItems[nextIndex]
-            let following = playlistItems[(nextIndex + 1) % playlistItems.count]
-            let item = PlaylistCompositionFactory.playerItem(
-                currentURL: current.url,
-                nextURL: playlistItems.count > 1 ? following.url : nil,
-                crossfadeDuration: editorConfiguration.playlist.crossfadeDuration
-            )
-            queuePlayer.insert(item, after: nil)
-            queuedCount += 1
-            nextIndex = (nextIndex + 1) % playlistItems.count
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+
+            var queuedCount = queuePlayer.items().count
+            var nextIndex = (startIndex + queuedCount) % items.count
+
+            while queuedCount < minimumQueuedItems {
+                let current = items[nextIndex]
+                let following = items[(nextIndex + 1) % items.count]
+                let item = await PlaylistCompositionFactory.playerItem(
+                    currentURL: current.url,
+                    nextURL: items.count > 1 ? following.url : nil,
+                    crossfadeDuration: crossfadeDuration
+                )
+
+                guard self.enqueueGeneration == generation,
+                      self.playlistItems == items,
+                      self.queuePlayer === queuePlayer else {
+                    return
+                }
+
+                queuePlayer.insert(item, after: nil)
+                queuedCount = queuePlayer.items().count
+                nextIndex = (nextIndex + 1) % items.count
+            }
         }
     }
 
@@ -538,7 +570,10 @@ private final class VideoWallpaperView: NSView {
                 }
 
                 self.currentPlaylistIndex = (self.currentPlaylistIndex + 1) % max(1, self.playlistItems.count)
-                self.sourceFrameRate = self.nominalFrameRate(for: AVURLAsset(url: self.playlistItems[self.currentPlaylistIndex].url))
+                self.updateSourceFrameRate(
+                    for: AVURLAsset(url: self.playlistItems[self.currentPlaylistIndex].url),
+                    generation: self.enqueueGeneration
+                )
                 self.enqueuePlaylistItems(startingAt: self.currentPlaylistIndex, minimumQueuedItems: min(3, self.playlistItems.count))
             }
         }
@@ -699,31 +734,150 @@ private final class VideoWallpaperView: NSView {
         playerLayer?.filters = filters
     }
 
-    private func nominalFrameRate(for asset: AVAsset) -> Double {
-        let nominalFrameRate = asset.tracks(withMediaType: .video).first?.nominalFrameRate ?? 0
+    private func updateSourceFrameRate(for asset: AVAsset, generation: Int) {
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            let frameRate = await self.nominalFrameRate(for: asset)
+            guard self.enqueueGeneration == generation else { return }
+            self.sourceFrameRate = frameRate
+            self.play(for: self.lastPlaybackMode)
+        }
+    }
+
+    private func nominalFrameRate(for asset: AVAsset) async -> Double {
+        guard let videoTrack = try? await asset.loadTracks(withMediaType: .video).first,
+              let nominalFrameRate = try? await videoTrack.load(.nominalFrameRate) else {
+            return 0
+        }
+
         guard nominalFrameRate.isFinite, nominalFrameRate > 0 else { return 0 }
         return Double(nominalFrameRate)
     }
 
-    private func effectivePlaybackRate(for mode: PlaybackMode) -> Float {
-        let baseRate = editorConfiguration.clampedPlaybackSpeed
-        guard sourceFrameRate > 0,
-              let targetFPS = targetFramesPerSecond(for: mode),
-              Double(targetFPS) > sourceFrameRate else {
-            return Float(baseRate)
+    private var effectivePlaybackRate: Float {
+        Float(editorConfiguration.clampedPlaybackSpeed)
+    }
+
+    private func updateFrameRateCap(for mode: PlaybackMode) {
+        guard let targetFPS = targetFramesPerSecond(for: mode) else {
+            clearFrameRateCap()
+            return
         }
 
-        let multiplier = PlaybackFrameRateCompensation.multiplier(sourceFPS: sourceFrameRate, targetFPS: targetFPS)
-        return Float(baseRate * multiplier)
+        let effectiveMaximumFPS = PlaybackFrameRateCap.effectiveMaximumFPS(
+            sourceFPS: sourceFrameRate,
+            playbackRate: editorConfiguration.clampedPlaybackSpeed,
+            targetFPS: targetFPS
+        )
+        applyFrameRateCap(maximumRealFPS: effectiveMaximumFPS, generation: enqueueGeneration)
+    }
+
+    private func applyFrameRateCap(maximumRealFPS: Int, generation: Int) {
+        let playbackRate = editorConfiguration.clampedPlaybackSpeed
+        let items = playerItemsForFrameRateCap()
+
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+
+            for item in items {
+                guard self.enqueueGeneration == generation,
+                      self.playerItemsForFrameRateCap().contains(where: { $0 === item }) else {
+                    return
+                }
+
+                let itemID = ObjectIdentifier(item)
+                if item.videoComposition != nil && !self.frameRateCappedItemIDs.contains(itemID) {
+                    continue
+                }
+
+                do {
+                    let composition = try await Self.cappedVideoComposition(
+                        for: item.asset,
+                        maximumRealFPS: maximumRealFPS,
+                        playbackRate: playbackRate
+                    )
+                    guard self.enqueueGeneration == generation,
+                          self.playerItemsForFrameRateCap().contains(where: { $0 === item }) else {
+                        return
+                    }
+
+                    item.videoComposition = composition
+                    self.frameRateCappedItemIDs.insert(itemID)
+                } catch {
+                    self.logger.debug("Could not apply frame-rate cap: \(error.localizedDescription, privacy: .public)")
+                }
+            }
+        }
+    }
+
+    private func clearFrameRateCap() {
+        guard !frameRateCappedItemIDs.isEmpty else { return }
+
+        for item in playerItemsForFrameRateCap() {
+            let itemID = ObjectIdentifier(item)
+            if frameRateCappedItemIDs.contains(itemID) {
+                item.videoComposition = nil
+            }
+        }
+
+        frameRateCappedItemIDs.removeAll()
+    }
+
+    private func playerItemsForFrameRateCap() -> [AVPlayerItem] {
+        var seen: Set<ObjectIdentifier> = []
+        var items: [AVPlayerItem] = []
+
+        if let loopTemplateItem {
+            seen.insert(ObjectIdentifier(loopTemplateItem))
+            items.append(loopTemplateItem)
+        }
+
+        for item in queuePlayer?.items() ?? [] {
+            let id = ObjectIdentifier(item)
+            if seen.insert(id).inserted {
+                items.append(item)
+            }
+        }
+
+        return items
+    }
+
+    private static func cappedVideoComposition(
+        for asset: AVAsset,
+        maximumRealFPS: Int,
+        playbackRate: Double
+    ) async throws -> AVMutableVideoComposition {
+        let composition = try await videoComposition(for: asset)
+        composition.sourceTrackIDForFrameTiming = kCMPersistentTrackID_Invalid
+        composition.frameDuration = CMTime(
+            seconds: max(0.001, playbackRate / Double(max(1, maximumRealFPS))),
+            preferredTimescale: 600
+        )
+        return composition
+    }
+
+    private static func videoComposition(for asset: AVAsset) async throws -> AVMutableVideoComposition {
+        try await withCheckedThrowingContinuation { continuation in
+            AVMutableVideoComposition.videoComposition(withPropertiesOf: asset) { composition, error in
+                if let composition {
+                    continuation.resume(returning: composition)
+                } else {
+                    continuation.resume(throwing: error ?? FrameRateCapError.cannotCreateVideoComposition)
+                }
+            }
+        }
+    }
+
+    private enum FrameRateCapError: Error {
+        case cannotCreateVideoComposition
     }
 
     private func targetFramesPerSecond(for mode: PlaybackMode) -> Int? {
         switch mode {
         case .full:
-            let nativeRefreshRate = window?.screen?.maximumFramesPerSecond ?? NSScreen.main?.maximumFramesPerSecond ?? 60
-            return PlaybackFrameRateCompensation.clampedTargetFPS(nativeRefreshRate)
+            return nil
         case .capped(let fps):
-            return PlaybackFrameRateCompensation.clampedTargetFPS(fps)
+            return PlaybackFrameRateCap.clampedTargetFPS(fps)
         case .posterFrame, .paused:
             return nil
         }

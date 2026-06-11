@@ -34,7 +34,7 @@ struct LocalVideoImporterTests {
         }
 
         try await Self.writeTestMovie(to: url)
-        let metadata = try LocalVideoImporter.metadata(for: url)
+        let metadata = try await LocalVideoImporter.metadata(for: url)
 
         #expect(metadata.displayName == url.deletingPathExtension().lastPathComponent)
         #expect(metadata.pixelWidth == 16)

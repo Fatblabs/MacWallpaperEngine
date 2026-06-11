@@ -29,25 +29,21 @@ public enum PlaybackMode: Codable, Equatable, Sendable {
     case paused(reason: PauseReason)
 }
 
-public enum PlaybackFrameRateCompensation {
+public enum PlaybackFrameRateCap {
     public static let maximumSupportedFPS = 500
-    public static let maximumPlaybackMultiplier: Double = 32
 
     public static func clampedTargetFPS(_ fps: Int) -> Int {
         min(max(1, fps), maximumSupportedFPS)
     }
 
-    public static func multiplier(sourceFPS: Double, targetFPS: Int) -> Double {
+    public static func effectiveMaximumFPS(sourceFPS: Double, playbackRate: Double, targetFPS: Int) -> Int {
+        let target = clampedTargetFPS(targetFPS)
         guard sourceFPS.isFinite, sourceFPS > 0 else {
-            return 1
+            return target
         }
 
-        let target = Double(clampedTargetFPS(targetFPS))
-        guard target > sourceFPS else {
-            return 1
-        }
-
-        return min(maximumPlaybackMultiplier, target / sourceFPS)
+        let sourceEffectiveFPS = Int((sourceFPS * max(0.01, playbackRate)).rounded(.up))
+        return min(target, clampedTargetFPS(sourceEffectiveFPS))
     }
 }
 
@@ -169,11 +165,11 @@ public final class PlaybackPolicyEngine {
         }
 
         if policy.reduceOnBattery && context.powerSource == .battery {
-            return .capped(fps: PlaybackFrameRateCompensation.clampedTargetFPS(policy.batteryFPSCap))
+            return .capped(fps: PlaybackFrameRateCap.clampedTargetFPS(policy.batteryFPSCap))
         }
 
         if let normalFPSCap = policy.normalFPSCap {
-            return .capped(fps: PlaybackFrameRateCompensation.clampedTargetFPS(normalFPSCap))
+            return .capped(fps: PlaybackFrameRateCap.clampedTargetFPS(normalFPSCap))
         }
 
         return .full

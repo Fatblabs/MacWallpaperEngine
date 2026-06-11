@@ -28,6 +28,7 @@ final class AppState: ObservableObject {
         }
     }
     @Published var launchAtLoginEnabled: Bool = LaunchAtLoginController.isEnabled
+    @Published var isExportingSmoothCopy = false
 
     let wallpaperCoordinator = WallpaperCoordinator()
 
@@ -252,6 +253,28 @@ final class AppState: ObservableObject {
         reconcile(assets: latestAssets, profiles: latestProfiles)
     }
 
+    func revealGeneratedVideosFolder() {
+        do {
+            let directory = try SmoothVideoExporter.generatedDirectory()
+            NSWorkspace.shared.open(directory)
+            statusMessage = "Opened generated videos folder"
+            lastErrorMessage = nil
+        } catch {
+            lastErrorMessage = "Generated videos folder could not be opened: \(error.localizedDescription)"
+        }
+    }
+
+    func revealWallpaperFile(_ asset: WallpaperAssetRecord) {
+        do {
+            let url = try asset.resolvedURL()
+            NSWorkspace.shared.activateFileViewerSelecting([url])
+            statusMessage = "Showing \(asset.displayName) in Finder"
+            lastErrorMessage = nil
+        } catch {
+            lastErrorMessage = "Video file could not be shown: \(error.localizedDescription)"
+        }
+    }
+
     func chooseVideo(modelContext: ModelContext) {
         let panel = NSOpenPanel()
         panel.title = "Choose a Local Video"
@@ -267,49 +290,64 @@ final class AppState: ObservableObject {
     }
 
     func importVideo(_ url: URL, modelContext: ModelContext) {
-        do {
-            let metadata = try LocalVideoImporter.metadata(for: url)
-            var asset = WallpaperAsset(
-                displayName: metadata.displayName,
-                originalFilename: metadata.originalFilename,
-                bookmarkData: metadata.bookmarkData,
-                duration: metadata.duration,
-                pixelWidth: metadata.pixelWidth,
-                pixelHeight: metadata.pixelHeight,
-                codecSummary: metadata.codecSummary,
-                lastKnownPath: metadata.lastKnownPath
-            )
-            asset.posterFrameFilename = PosterFrameCache.generatePoster(for: url, assetID: asset.id)
-            let record = WallpaperAssetRecord(asset: asset)
-            modelContext.insert(record)
+        statusMessage = "Preparing \(url.lastPathComponent)..."
+        lastErrorMessage = nil
 
-            for display in WallpaperDisplay.displays() {
-                let screenID = display.idString
-                let descriptor = FetchDescriptor<DisplayProfileRecord>(
-                    predicate: #Predicate { $0.screenID == screenID }
-                )
-                let existing = try modelContext.fetch(descriptor).first
-                if let existing {
-                    existing.assignedAssetID = record.id
-                    existing.updatedAt = Date()
-                } else {
-                    modelContext.insert(
-                        DisplayProfileRecord(
-                            screenID: display.idString,
-                            assignedAssetID: record.id,
-                            layoutMode: .fill
-                        )
-                    )
-                }
+        Task {
+            do {
+                let preparedImport = try await Task.detached(priority: .utility) {
+                    try ManagedVideoLibrary.prepareForImport(url)
+                }.value
+
+                try await importPreparedVideo(preparedImport, modelContext: modelContext)
+            } catch {
+                lastErrorMessage = error.localizedDescription
             }
-
-            try modelContext.save()
-            try reconcileFromStore(modelContext: modelContext)
-            statusMessage = "Imported \(metadata.originalFilename)"
-            lastErrorMessage = nil
-        } catch {
-            lastErrorMessage = error.localizedDescription
         }
+    }
+
+    private func importPreparedVideo(_ preparedImport: PreparedVideoImport, modelContext: ModelContext) async throws {
+        let metadata = try await LocalVideoImporter.metadata(for: preparedImport.url)
+        var asset = WallpaperAsset(
+            displayName: metadata.displayName,
+            originalFilename: metadata.originalFilename,
+            bookmarkData: metadata.bookmarkData,
+            duration: metadata.duration,
+            pixelWidth: metadata.pixelWidth,
+            pixelHeight: metadata.pixelHeight,
+            codecSummary: metadata.codecSummary,
+            lastKnownPath: metadata.lastKnownPath
+        )
+        asset.posterFrameFilename = PosterFrameCache.generatePoster(for: preparedImport.url, assetID: asset.id)
+        let record = WallpaperAssetRecord(asset: asset)
+        modelContext.insert(record)
+
+        for display in WallpaperDisplay.displays() {
+            let screenID = display.idString
+            let descriptor = FetchDescriptor<DisplayProfileRecord>(
+                predicate: #Predicate { $0.screenID == screenID }
+            )
+            let existing = try modelContext.fetch(descriptor).first
+            if let existing {
+                existing.assignedAssetID = record.id
+                existing.updatedAt = Date()
+            } else {
+                modelContext.insert(
+                    DisplayProfileRecord(
+                        screenID: display.idString,
+                        assignedAssetID: record.id,
+                        layoutMode: .fill
+                    )
+                )
+            }
+        }
+
+        try modelContext.save()
+        try reconcileFromStore(modelContext: modelContext)
+        statusMessage = preparedImport.wasCopied
+            ? "Copied and imported \(metadata.originalFilename)"
+            : "Imported \(metadata.originalFilename)"
+        lastErrorMessage = nil
     }
 
     func setAsset(_ asset: WallpaperAssetRecord, for display: WallpaperDisplay?, modelContext: ModelContext) {
@@ -459,7 +497,7 @@ final class AppState: ObservableObject {
                     trim: configuration.videoTrim
                 )
 
-                let metadata = try LocalVideoImporter.metadata(for: outputURL)
+                let metadata = try await LocalVideoImporter.metadata(for: outputURL)
                 var newAsset = WallpaperAsset(
                     displayName: "\(metadata.displayName) Optimized",
                     originalFilename: metadata.originalFilename,
@@ -481,6 +519,62 @@ final class AppState: ObservableObject {
             } catch {
                 lastErrorMessage = "Snippet export failed: \(error.localizedDescription)"
             }
+        }
+    }
+
+    func exportSmoothCopy(
+        for asset: WallpaperAssetRecord,
+        preset: SmoothVideoExportPreset,
+        modelContext: ModelContext
+    ) {
+        guard !isExportingSmoothCopy else { return }
+
+        do {
+            let sourceURL = try asset.resolvedURL()
+            let assetID = asset.id
+            let sourceDisplayName = asset.displayName
+            let exportLabel = preset.exportLabel
+            isExportingSmoothCopy = true
+            statusMessage = "Generating \(exportLabel) smooth copy..."
+            lastErrorMessage = nil
+
+            Task {
+                defer { isExportingSmoothCopy = false }
+
+                do {
+                    let outputURL = try await Task.detached(priority: .utility) {
+                        try await SmoothVideoExporter.exportSmoothCopy(
+                            sourceURL: sourceURL,
+                            assetID: assetID,
+                            sourceDisplayName: sourceDisplayName,
+                            preset: preset
+                        )
+                    }.value
+
+                    let metadata = try await LocalVideoImporter.metadata(for: outputURL)
+                    var newAsset = WallpaperAsset(
+                        displayName: "\(sourceDisplayName) Smooth \(exportLabel)",
+                        originalFilename: metadata.originalFilename,
+                        bookmarkData: metadata.bookmarkData,
+                        duration: metadata.duration,
+                        pixelWidth: metadata.pixelWidth,
+                        pixelHeight: metadata.pixelHeight,
+                        codecSummary: metadata.codecSummary,
+                        lastKnownPath: metadata.lastKnownPath
+                    )
+                    newAsset.posterFrameFilename = PosterFrameCache.generatePoster(for: outputURL, assetID: newAsset.id)
+                    modelContext.insert(WallpaperAssetRecord(asset: newAsset))
+
+                    try modelContext.save()
+                    try reconcileFromStore(modelContext: modelContext)
+                    statusMessage = "Generated \(exportLabel) smooth copy"
+                    lastErrorMessage = nil
+                } catch {
+                    lastErrorMessage = "Smooth copy failed: \(error.localizedDescription)"
+                }
+            }
+        } catch {
+            lastErrorMessage = "Smooth copy failed: \(error.localizedDescription)"
         }
     }
 

@@ -116,7 +116,7 @@ public enum LocalVideoImporter {
         return type.conforms(to: .movie) || type.conforms(to: .video) || type.conforms(to: .audiovisualContent)
     }
 
-    public static func metadata(for url: URL) throws -> ImportedVideoMetadata {
+    public static func metadata(for url: URL) async throws -> ImportedVideoMetadata {
         guard url.isFileURL else {
             throw LocalVideoImportError.notAFileURL
         }
@@ -133,15 +133,15 @@ public enum LocalVideoImporter {
         }
 
         let asset = AVURLAsset(url: url)
-        let tracks = asset.tracks(withMediaType: .video)
+        let tracks = try await asset.loadTracks(withMediaType: .video)
         guard let videoTrack = tracks.first else {
             throw LocalVideoImportError.missingVideoTrack
         }
 
-        let naturalSize = videoTrack.naturalSize.applying(videoTrack.preferredTransform)
-        let width = Int(abs(naturalSize.width))
-        let height = Int(abs(naturalSize.height))
-        let duration = CMTimeGetSeconds(asset.duration)
+        let videoSize = try await videoSize(for: videoTrack)
+        let width = Int(abs(videoSize.width))
+        let height = Int(abs(videoSize.height))
+        let duration = CMTimeGetSeconds(try await asset.load(.duration))
         let bookmarkData = try url.bookmarkData(
             options: [.withSecurityScope],
             includingResourceValuesForKeys: nil,
@@ -155,18 +155,24 @@ public enum LocalVideoImporter {
             duration: duration.isFinite ? duration : 0,
             pixelWidth: width,
             pixelHeight: height,
-            codecSummary: codecSummary(for: videoTrack),
+            codecSummary: await codecSummary(for: videoTrack),
             lastKnownPath: url.path
         )
     }
 
-    private static func codecSummary(for track: AVAssetTrack) -> String {
-        guard let firstFormatDescription = track.formatDescriptions.first else {
+    private static func videoSize(for track: AVAssetTrack) async throws -> CGSize {
+        let naturalSize = try await track.load(.naturalSize)
+        let preferredTransform = try await track.load(.preferredTransform)
+        return naturalSize.applying(preferredTransform)
+    }
+
+    private static func codecSummary(for track: AVAssetTrack) async -> String {
+        guard let formatDescriptions = try? await track.load(.formatDescriptions),
+              let firstFormatDescription = formatDescriptions.first else {
             return "Video"
         }
 
-        let formatDescription = firstFormatDescription as! CMFormatDescription
-        let mediaSubtype = CMFormatDescriptionGetMediaSubType(formatDescription)
+        let mediaSubtype = CMFormatDescriptionGetMediaSubType(firstFormatDescription)
         let bytes: [UInt8] = [
             UInt8((mediaSubtype >> 24) & 0xff),
             UInt8((mediaSubtype >> 16) & 0xff),

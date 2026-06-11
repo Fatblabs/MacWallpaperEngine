@@ -14,6 +14,7 @@ struct ContentView: View {
     @State private var selectedWidgetID: UUID?
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
     @State private var isDropTargeted = false
+    @State private var didInitializeSelection = false
 
     private var selectedAsset: WallpaperAssetRecord? {
         if let selectedAssetID,
@@ -33,6 +34,24 @@ struct ContentView: View {
 
     private var assetIDs: [UUID] {
         assets.map(\.id)
+    }
+
+    private var preferredSelectedAssetID: UUID? {
+        let availableAssetIDs = Set(assetIDs)
+        if let firstDisplayID = WallpaperDisplay.displays().first?.idString,
+           let assignedAssetID = profiles.first(where: { $0.screenID == firstDisplayID })?.assignedAssetID,
+           availableAssetIDs.contains(assignedAssetID) {
+            return assignedAssetID
+        }
+
+        return profiles
+            .compactMap(\.assignedAssetID)
+            .first { availableAssetIDs.contains($0) } ?? assets.first?.id
+    }
+
+    private var hasValidSelection: Bool {
+        guard let selectedAssetID else { return false }
+        return assetIDs.contains(selectedAssetID)
     }
 
     private var editorFingerprints: [String] {
@@ -72,14 +91,25 @@ struct ContentView: View {
             isDropTargeted = isTargeted
         }
         .onAppear {
-            if selectedAssetID == nil {
-                selectedAssetID = selectedAsset?.id
+            if !hasValidSelection {
+                selectedAssetID = preferredSelectedAssetID
             }
+            didInitializeSelection = true
             appState.start()
         }
+        .onChange(of: selectedAssetID) { oldValue, newValue in
+            guard didInitializeSelection,
+                  oldValue != nil,
+                  let newValue,
+                  let selected = assets.first(where: { $0.id == newValue }) else {
+                return
+            }
+
+            appState.setAsset(selected, for: nil, modelContext: modelContext)
+        }
         .onChange(of: assetIDs) {
-            if selectedAsset == nil {
-                selectedAssetID = assets.first?.id
+            if !hasValidSelection {
+                selectedAssetID = preferredSelectedAssetID
             }
             appState.reconcile(assets: assets, profiles: profiles)
         }
@@ -189,6 +219,14 @@ private struct MasterLibrarySidebar: View {
                         SidebarAssetRow(asset: asset)
                             .tag(Optional(asset.id))
                             .contextMenu {
+                                Button {
+                                    appState.revealWallpaperFile(asset)
+                                } label: {
+                                    Label("Show Video in Finder", systemImage: "folder")
+                                }
+
+                                Divider()
+
                                 Button(role: .destructive) {
                                     remove(asset)
                                 } label: {
@@ -250,6 +288,7 @@ private struct SidebarAssetRow: View {
             }
         }
         .padding(.vertical, 4)
+        .contentShape(Rectangle())
     }
 
     private func formattedDuration(_ duration: Double) -> String {
@@ -464,6 +503,7 @@ private struct TrimmingOptimizationPane: View {
                 Text("Timeline Trimmer")
                     .font(.headline)
                 Spacer()
+                SmoothCopyMenu(asset: asset)
                 Button("Export Optimized Snippet") {
                     appState.exportOptimizedSnippet(
                         for: asset,
@@ -497,6 +537,219 @@ private struct TrimmingOptimizationPane: View {
             let clampedEnd = min(max(proposedStart + 30, proposedEnd), min(asset.duration, proposedStart + 60))
             configuration.videoTrim = VideoTrimConfiguration(startSeconds: min(proposedStart, max(0, clampedEnd - 30)), endSeconds: clampedEnd)
         }
+    }
+}
+
+private struct SmoothCopyMenu: View {
+    @Environment(\.modelContext) private var modelContext
+    @EnvironmentObject private var appState: AppState
+
+    let asset: WallpaperAssetRecord
+    @State private var isShowingCustomSettings = false
+    @State private var targetFPS = 120
+    @State private var resolutionMode: SmoothCopyResolutionMode = .native
+    @State private var customWidth = 1_920
+    @State private var customHeight = 1_080
+    @State private var interpolationMode: SmoothVideoInterpolationMode = .opticalFlow
+
+    var body: some View {
+        Button("Generate Smooth Copy") {
+            primeCustomDimensionsFromAsset()
+            isShowingCustomSettings = true
+        }
+        .help("Create a local generated-frame video copy")
+        .popover(isPresented: $isShowingCustomSettings) {
+            SmoothCopySettingsPopover(
+                asset: asset,
+                targetFPS: $targetFPS,
+                resolutionMode: $resolutionMode,
+                customWidth: $customWidth,
+                customHeight: $customHeight,
+                interpolationMode: $interpolationMode
+            ) {
+                appState.exportSmoothCopy(for: asset, preset: customPreset, modelContext: modelContext)
+                isShowingCustomSettings = false
+            } onRevealGeneratedVideos: {
+                appState.revealGeneratedVideosFolder()
+            }
+        }
+        .onAppear {
+            primeCustomDimensionsFromAsset()
+        }
+        .onChange(of: asset.id) {
+            primeCustomDimensionsFromAsset()
+        }
+    }
+
+    private var customPreset: SmoothVideoExportPreset {
+        SmoothVideoExportPreset(
+            title: "Custom Smooth Copy",
+            targetFPS: targetFPS,
+            maximumLongEdge: resolutionMode.maximumLongEdge,
+            customDimensions: customDimensions,
+            interpolationMode: interpolationMode
+        )
+    }
+
+    private var customDimensions: SmoothVideoExportDimensions? {
+        guard resolutionMode == .custom else { return nil }
+        return SmoothVideoExportDimensions(width: customWidth, height: customHeight)
+    }
+
+    private func primeCustomDimensionsFromAsset() {
+        guard customWidth == 1_920 && customHeight == 1_080 else { return }
+        customWidth = max(2, asset.pixelWidth)
+        customHeight = max(2, asset.pixelHeight)
+    }
+}
+
+private enum SmoothCopyResolutionMode: String, CaseIterable, Identifiable {
+    case native
+    case fhd1080p
+    case qhd1440p
+    case fourK
+    case custom
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .native:
+            "Native"
+        case .fhd1080p:
+            "1080p"
+        case .qhd1440p:
+            "1440p"
+        case .fourK:
+            "4K"
+        case .custom:
+            "Custom"
+        }
+    }
+
+    var maximumLongEdge: Int? {
+        switch self {
+        case .native, .custom:
+            nil
+        case .fhd1080p:
+            1_920
+        case .qhd1440p:
+            2_560
+        case .fourK:
+            3_840
+        }
+    }
+}
+
+private struct SmoothCopySettingsPopover: View {
+    let asset: WallpaperAssetRecord
+    @Binding var targetFPS: Int
+    @Binding var resolutionMode: SmoothCopyResolutionMode
+    @Binding var customWidth: Int
+    @Binding var customHeight: Int
+    @Binding var interpolationMode: SmoothVideoInterpolationMode
+    let onGenerate: () -> Void
+    let onRevealGeneratedVideos: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Smooth Copy Settings")
+                    .font(.headline)
+                Text(asset.displayName)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+
+            FPSCapControl(title: "Frame rate", fps: $targetFPS)
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Resolution")
+                    .font(.subheadline.weight(.medium))
+
+                Picker("Resolution", selection: $resolutionMode) {
+                    ForEach(SmoothCopyResolutionMode.allCases) { mode in
+                        Text(mode.title).tag(mode)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.segmented)
+            }
+
+            if resolutionMode == .custom {
+                HStack(spacing: 8) {
+                    TextField("Width", value: $customWidth, format: .number)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 92)
+                    Text("x")
+                        .foregroundStyle(.secondary)
+                    TextField("Height", value: $customHeight, format: .number)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 92)
+                    Text("px")
+                        .foregroundStyle(.secondary)
+                }
+                .monospacedDigit()
+            }
+
+            Picker("Interpolation", selection: $interpolationMode) {
+                ForEach(SmoothVideoInterpolationMode.allCases, id: \.self) { mode in
+                    Text(mode.displayTitle).tag(mode)
+                }
+            }
+            .pickerStyle(.menu)
+
+            Text("Output: \(outputSummary)")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            HStack {
+                Button {
+                    onRevealGeneratedVideos()
+                } label: {
+                    Label("Show Generated Videos", systemImage: "folder")
+                }
+
+                Spacer()
+
+                Button("Generate") {
+                    targetFPS = PlaybackFrameRateCap.clampedTargetFPS(targetFPS)
+                    normalizeCustomDimensions()
+                    onGenerate()
+                }
+                .buttonStyle(.borderedProminent)
+                .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(16)
+        .frame(width: 380)
+    }
+
+    private var outputSummary: String {
+        let preset = SmoothVideoExportPreset(
+            title: "Custom Smooth Copy",
+            targetFPS: targetFPS,
+            maximumLongEdge: resolutionMode.maximumLongEdge,
+            customDimensions: resolutionMode == .custom
+                ? SmoothVideoExportDimensions(width: customWidth, height: customHeight)
+                : nil,
+            interpolationMode: interpolationMode
+        )
+        let dimensions = preset.outputDimensions(sourceWidth: asset.pixelWidth, sourceHeight: asset.pixelHeight)
+        return "\(preset.normalizedTargetFPS) fps, \(dimensions.width)x\(dimensions.height), \(interpolationMode.displayTitle)"
+    }
+
+    private func normalizeCustomDimensions() {
+        guard resolutionMode == .custom else { return }
+        let preset = SmoothVideoExportPreset(
+            title: "Custom Smooth Copy",
+            targetFPS: targetFPS,
+            customDimensions: SmoothVideoExportDimensions(width: customWidth, height: customHeight),
+            interpolationMode: interpolationMode
+        )
+        let dimensions = preset.outputDimensions(sourceWidth: asset.pixelWidth, sourceHeight: asset.pixelHeight)
+        customWidth = dimensions.width
+        customHeight = dimensions.height
     }
 }
 
@@ -635,6 +888,8 @@ private struct QuickFlowPane: View {
             Button("Add Clock") {
                 addWidget(.clock())
             }
+
+            SmoothCopyMenu(asset: asset)
         }
     }
 

@@ -7,12 +7,13 @@ APP_DIR="$ROOT_DIR/dist/$APP_NAME.app"
 CONTENTS_DIR="$APP_DIR/Contents"
 MACOS_DIR="$CONTENTS_DIR/MacOS"
 RESOURCES_DIR="$CONTENTS_DIR/Resources"
+CONFIGURATION="${CONFIGURATION:-release}"
 
-swift build --package-path "$ROOT_DIR" -c debug
+swift build --package-path "$ROOT_DIR" -c "$CONFIGURATION"
 
-EXECUTABLE="$ROOT_DIR/.build/arm64-apple-macosx/debug/$APP_NAME"
+EXECUTABLE="$ROOT_DIR/.build/arm64-apple-macosx/$CONFIGURATION/$APP_NAME"
 if [[ ! -x "$EXECUTABLE" ]]; then
-  EXECUTABLE="$ROOT_DIR/.build/debug/$APP_NAME"
+  EXECUTABLE="$ROOT_DIR/.build/$CONFIGURATION/$APP_NAME"
 fi
 
 if [[ ! -x "$EXECUTABLE" ]]; then

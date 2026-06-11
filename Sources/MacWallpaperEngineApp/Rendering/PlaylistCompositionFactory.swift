@@ -9,10 +9,10 @@ enum PlaylistCompositionFactory {
         nextURL: URL?,
         crossfadeDuration: Double,
         preferredBufferSeconds: Double = 5
-    ) -> AVPlayerItem {
+    ) async -> AVPlayerItem {
         guard let nextURL,
               crossfadeDuration > 0,
-              let transitionItem = transitionItem(
+              let transitionItem = await transitionItem(
                 currentURL: currentURL,
                 nextURL: nextURL,
                 crossfadeDuration: crossfadeDuration
@@ -30,16 +30,18 @@ enum PlaylistCompositionFactory {
         currentURL: URL,
         nextURL: URL,
         crossfadeDuration: Double
-    ) -> AVPlayerItem? {
+    ) async -> AVPlayerItem? {
         let currentAsset = AVURLAsset(url: currentURL)
         let nextAsset = AVURLAsset(url: nextURL)
 
-        guard let currentTrack = currentAsset.tracks(withMediaType: .video).first,
-              let nextTrack = nextAsset.tracks(withMediaType: .video).first else {
+        guard let currentTrack = try? await currentAsset.loadTracks(withMediaType: .video).first,
+              let nextTrack = try? await nextAsset.loadTracks(withMediaType: .video).first,
+              let currentDuration = try? await currentAsset.load(.duration),
+              let currentTransform = try? await currentTrack.load(.preferredTransform),
+              let nextTransform = try? await nextTrack.load(.preferredTransform) else {
             return nil
         }
 
-        let currentDuration = currentAsset.duration
         guard currentDuration.seconds.isFinite, currentDuration.seconds > 0.5 else {
             return nil
         }
@@ -73,13 +75,15 @@ enum PlaylistCompositionFactory {
                 of: nextTrack,
                 at: fadeStart
             )
-            baseTrack.preferredTransform = currentTrack.preferredTransform
-            overlayTrack.preferredTransform = nextTrack.preferredTransform
+            baseTrack.preferredTransform = currentTransform
+            overlayTrack.preferredTransform = nextTransform
         } catch {
             return nil
         }
 
-        let renderSize = positiveRenderSize(for: currentTrack)
+        guard let renderSize = try? await positiveRenderSize(for: currentTrack, transform: currentTransform) else {
+            return nil
+        }
         let videoComposition = AVMutableVideoComposition()
         videoComposition.renderSize = renderSize
         videoComposition.frameDuration = CMTime(value: 1, timescale: 30)
@@ -87,16 +91,16 @@ enum PlaylistCompositionFactory {
         let beforeInstruction = AVMutableVideoCompositionInstruction()
         beforeInstruction.timeRange = CMTimeRange(start: .zero, end: fadeStart)
         let beforeLayer = AVMutableVideoCompositionLayerInstruction(assetTrack: baseTrack)
-        beforeLayer.setTransform(currentTrack.preferredTransform, at: .zero)
+        beforeLayer.setTransform(currentTransform, at: .zero)
         beforeInstruction.layerInstructions = [beforeLayer]
 
         let fadeInstruction = AVMutableVideoCompositionInstruction()
         fadeInstruction.timeRange = CMTimeRange(start: fadeStart, duration: fadeDuration)
         let fadeOutLayer = AVMutableVideoCompositionLayerInstruction(assetTrack: baseTrack)
-        fadeOutLayer.setTransform(currentTrack.preferredTransform, at: fadeStart)
+        fadeOutLayer.setTransform(currentTransform, at: fadeStart)
         fadeOutLayer.setOpacityRamp(fromStartOpacity: 1, toEndOpacity: 0, timeRange: fadeInstruction.timeRange)
         let fadeInLayer = AVMutableVideoCompositionLayerInstruction(assetTrack: overlayTrack)
-        fadeInLayer.setTransform(nextTrack.preferredTransform, at: fadeStart)
+        fadeInLayer.setTransform(nextTransform, at: fadeStart)
         fadeInLayer.setOpacityRamp(fromStartOpacity: 0, toEndOpacity: 1, timeRange: fadeInstruction.timeRange)
         fadeInstruction.layerInstructions = [fadeInLayer, fadeOutLayer]
 
@@ -107,8 +111,8 @@ enum PlaylistCompositionFactory {
         return item
     }
 
-    private static func positiveRenderSize(for track: AVAssetTrack) -> CGSize {
-        let transformedSize = track.naturalSize.applying(track.preferredTransform)
+    private static func positiveRenderSize(for track: AVAssetTrack, transform: CGAffineTransform) async throws -> CGSize {
+        let transformedSize = try await track.load(.naturalSize).applying(transform)
         return CGSize(width: max(1, abs(transformedSize.width)), height: max(1, abs(transformedSize.height)))
     }
 }

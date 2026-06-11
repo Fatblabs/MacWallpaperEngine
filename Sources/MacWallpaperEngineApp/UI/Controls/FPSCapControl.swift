@@ -82,6 +82,6 @@ struct FPSCapControl: View {
             return 0
         }
 
-        return PlaybackFrameRateCompensation.clampedTargetFPS(value)
+        return PlaybackFrameRateCap.clampedTargetFPS(value)
     }
 }

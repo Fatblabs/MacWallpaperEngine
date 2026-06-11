@@ -33,15 +33,15 @@ struct PlaybackPolicyEngineTests {
         let policy = PlaybackPolicy(normalFPSCap: 999)
 
         #expect(engine.mode(for: context, policy: policy) == .capped(fps: 500))
-        #expect(PlaybackFrameRateCompensation.clampedTargetFPS(500) == 500)
-        #expect(PlaybackFrameRateCompensation.clampedTargetFPS(501) == 500)
+        #expect(PlaybackFrameRateCap.clampedTargetFPS(500) == 500)
+        #expect(PlaybackFrameRateCap.clampedTargetFPS(501) == 500)
     }
 
     @Test
-    func frameRateCompensationMatchesTargetToSourceRatio() {
-        #expect(PlaybackFrameRateCompensation.multiplier(sourceFPS: 60, targetFPS: 120) == 2)
-        #expect(PlaybackFrameRateCompensation.multiplier(sourceFPS: 120, targetFPS: 60) == 1)
-        #expect(PlaybackFrameRateCompensation.multiplier(sourceFPS: 60, targetFPS: 500).rounded(.down) == 8)
+    func frameRateCapDoesNotUpscaleSourceFrameRate() {
+        #expect(PlaybackFrameRateCap.effectiveMaximumFPS(sourceFPS: 60, playbackRate: 1, targetFPS: 120) == 60)
+        #expect(PlaybackFrameRateCap.effectiveMaximumFPS(sourceFPS: 60, playbackRate: 2, targetFPS: 60) == 60)
+        #expect(PlaybackFrameRateCap.effectiveMaximumFPS(sourceFPS: 60, playbackRate: 2, targetFPS: 500) == 120)
     }
 
     @Test

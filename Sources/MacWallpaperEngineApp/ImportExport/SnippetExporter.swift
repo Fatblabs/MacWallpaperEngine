@@ -28,7 +28,7 @@ enum SnippetExporter {
         let sourceAsset = AVURLAsset(url: sourceURL)
         let composition = AVMutableComposition()
 
-        guard let sourceTrack = sourceAsset.tracks(withMediaType: .video).first,
+        guard let sourceTrack = try await sourceAsset.loadTracks(withMediaType: .video).first,
               let videoTrack = composition.addMutableTrack(
                 withMediaType: .video,
                 preferredTrackID: kCMPersistentTrackID_Invalid
@@ -37,9 +37,9 @@ enum SnippetExporter {
         }
 
         try videoTrack.insertTimeRange(timeRange, of: sourceTrack, at: .zero)
-        videoTrack.preferredTransform = sourceTrack.preferredTransform
+        videoTrack.preferredTransform = try await sourceTrack.load(.preferredTransform)
 
-        if let audioSourceTrack = sourceAsset.tracks(withMediaType: .audio).first,
+        if let audioSourceTrack = try await sourceAsset.loadTracks(withMediaType: .audio).first,
            let audioTrack = composition.addMutableTrack(
             withMediaType: .audio,
             preferredTrackID: kCMPersistentTrackID_Invalid

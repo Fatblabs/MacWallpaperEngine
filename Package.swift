@@ -32,6 +32,7 @@ let package = Package(
                 .linkedFramework("AppKit"),
                 .linkedFramework("AVFoundation"),
                 .linkedFramework("CoreGraphics"),
+                .linkedFramework("CoreImage"),
                 .linkedFramework("CoreVideo"),
                 .linkedFramework("IOKit"),
                 .linkedFramework("Metal"),
@@ -39,12 +40,20 @@ let package = Package(
                 .linkedFramework("ServiceManagement"),
                 .linkedFramework("SwiftData"),
                 .linkedFramework("SwiftUI"),
-                .linkedFramework("UniformTypeIdentifiers")
+                .linkedFramework("UniformTypeIdentifiers"),
+                .linkedFramework("Vision")
             ]
         ),
         .testTarget(
             name: "MacWallpaperEngineCoreTests",
             dependencies: ["MacWallpaperEngineCore"]
+        ),
+        .testTarget(
+            name: "MacWallpaperEngineAppTests",
+            dependencies: [
+                "MacWallpaperEngineApp",
+                "MacWallpaperEngineCore"
+            ]
         )
     ]
 )
