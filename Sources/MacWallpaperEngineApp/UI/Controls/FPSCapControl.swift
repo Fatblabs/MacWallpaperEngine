@@ -8,7 +8,8 @@ struct FPSCapControl: View {
 
     @State private var typedValue = ""
 
-    private let presets = [0, 15, 24, 30, 60, 90, 120, 144, 165, 240, 360, 500]
+    private static let presets = [0, 15, 24, 30, 60, 90, 120, 144, 165, 240, 360, 500]
+    private static let positivePresets = presets.filter { $0 > 0 }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -26,7 +27,7 @@ struct FPSCapControl: View {
                     if allowsNative {
                         Text("Native").tag(0)
                     }
-                    ForEach(presets.filter { allowsNative || $0 > 0 }, id: \.self) { preset in
+                    ForEach(allowsNative ? Self.presets : Self.positivePresets, id: \.self) { preset in
                         if preset > 0 {
                             Text("\(preset) fps").tag(preset)
                         }

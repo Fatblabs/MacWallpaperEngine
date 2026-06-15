@@ -66,6 +66,38 @@ struct SmoothVideoExporterTests {
         #expect(metadata.duration > 0)
     }
 
+    @Test
+    func exportsUpscaledCopyToCustomResolution() async throws {
+        let sourceURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+            .appendingPathExtension("mov")
+        defer {
+            try? FileManager.default.removeItem(at: sourceURL)
+        }
+
+        try await Self.writeTestMovie(to: sourceURL)
+
+        let outputURL = try await SmoothVideoExporter.exportSmoothCopy(
+            sourceURL: sourceURL,
+            assetID: UUID(),
+            sourceDisplayName: "MetalFX Upscale Smoke Test",
+            preset: SmoothVideoExportPreset(
+                title: "MetalFX 2x Smoke",
+                targetFPS: 60,
+                customDimensions: SmoothVideoExportDimensions(width: 256, height: 144),
+                interpolationMode: .duplicate
+            )
+        )
+        defer {
+            try? FileManager.default.removeItem(at: outputURL)
+        }
+
+        let metadata = try await LocalVideoImporter.metadata(for: outputURL)
+        #expect(metadata.pixelWidth == 256)
+        #expect(metadata.pixelHeight == 144)
+        #expect(metadata.duration > 0)
+    }
+
     private static func writeTestMovie(to url: URL) async throws {
         let writer = try AVAssetWriter(outputURL: url, fileType: .mov)
         let settings: [String: Any] = [

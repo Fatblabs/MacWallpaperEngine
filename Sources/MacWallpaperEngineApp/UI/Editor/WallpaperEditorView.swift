@@ -256,7 +256,7 @@ struct TuningSlider: View {
 struct InstalledFontPicker: View {
     let title: String
     @Binding var selection: String
-    private let fonts = NSFontManager.shared.availableFonts.sorted()
+    private static let fonts = NSFontManager.shared.availableFonts.sorted()
 
     init(_ title: String, selection: Binding<String>) {
         self.title = title
@@ -265,7 +265,7 @@ struct InstalledFontPicker: View {
 
     var body: some View {
         Picker(title, selection: $selection) {
-            ForEach(fonts, id: \.self) { fontName in
+            ForEach(Self.fonts, id: \.self) { fontName in
                 Text(fontName).tag(fontName)
             }
         }

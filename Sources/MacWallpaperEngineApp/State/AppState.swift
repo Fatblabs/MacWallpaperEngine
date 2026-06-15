@@ -664,8 +664,14 @@ final class AppState: ObservableObject {
             strictestMode = stricterMode(strictestMode, mode)
         }
 
-        playbackMode = strictestMode
-        statusMessage = status(for: strictestMode)
+        if playbackMode != strictestMode {
+            playbackMode = strictestMode
+        }
+
+        let nextStatusMessage = status(for: strictestMode)
+        if statusMessage != nextStatusMessage {
+            statusMessage = nextStatusMessage
+        }
     }
 
     private func stricterMode(_ lhs: PlaybackMode, _ rhs: PlaybackMode) -> PlaybackMode {

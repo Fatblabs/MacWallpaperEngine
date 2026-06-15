@@ -17,6 +17,9 @@ let package = Package(
             targets: ["MacWallpaperEngineApp"]
         )
     ],
+    dependencies: [
+        .package(url: "https://github.com/finnvoor/fx-upscale.git", from: "1.2.6")
+    ],
     targets: [
         .target(
             name: "MacWallpaperEngineCore",
@@ -27,7 +30,10 @@ let package = Package(
         ),
         .executableTarget(
             name: "MacWallpaperEngineApp",
-            dependencies: ["MacWallpaperEngineCore"],
+            dependencies: [
+                "MacWallpaperEngineCore",
+                .product(name: "Upscaling", package: "fx-upscale")
+            ],
             linkerSettings: [
                 .linkedFramework("AppKit"),
                 .linkedFramework("AVFoundation"),

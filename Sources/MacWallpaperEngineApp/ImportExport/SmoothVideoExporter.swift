@@ -6,6 +6,7 @@ import Foundation
 import MacWallpaperEngineCore
 import Metal
 import MetalKit
+import Upscaling
 import Vision
 
 enum SmoothVideoExporter {
@@ -91,9 +92,15 @@ enum SmoothVideoExporter {
             .workingColorSpace: CGColorSpaceCreateDeviceRGB(),
             .outputColorSpace: CGColorSpaceCreateDeviceRGB()
         ])
-        let opticalFlowInterpolator = try? MetalOpticalFlowInterpolator(device: metalDevice)
-        let outputBounds = CGRect(x: 0, y: 0, width: outputSize.width, height: outputSize.height)
         let colorSpace = CGColorSpaceCreateDeviceRGB()
+        let outputBounds = CGRect(x: 0, y: 0, width: outputSize.width, height: outputSize.height)
+        let metalFXUpscaler = MetalFXFrameUpscaler(
+            sourceSize: sourceSize,
+            outputSize: outputSize,
+            ciContext: ciContext,
+            colorSpace: colorSpace
+        )
+        let opticalFlowInterpolator = try? MetalOpticalFlowInterpolator(device: metalDevice)
         let frameCount = max(1, Int(ceil(duration * Double(targetFPS))))
         let maxSourceFrameIndex = max(0, Int(floor(duration * sourceFPS)))
         let maxReadableTime = max(0, duration - min(1 / sourceFPS, 0.001))
@@ -121,7 +128,7 @@ enum SmoothVideoExporter {
                 cache: &cachedImages
             )
             let baseCIImage = CIImage(cgImage: baseImage)
-            var outputImage = scaledImage(baseCIImage, to: outputBounds)
+            var outputImage = await upscaledImage(baseCIImage, using: metalFXUpscaler, to: outputBounds)
 
             if preset.interpolationMode != .duplicate, blendAmount > 0.001, upperSourceIndex != lowerSourceIndex {
                 let nextImage = try sourceImage(
@@ -131,12 +138,13 @@ enum SmoothVideoExporter {
                     imageGenerator: imageGenerator,
                     cache: &cachedImages
                 )
-                outputImage = interpolatedImage(
+                outputImage = await interpolatedImage(
                     from: baseImage,
                     to: nextImage,
                     amount: blendAmount,
                     mode: preset.interpolationMode,
                     outputBounds: outputBounds,
+                    metalFXUpscaler: metalFXUpscaler,
                     opticalFlowInterpolator: opticalFlowInterpolator
                 )
             }
@@ -196,7 +204,19 @@ enum SmoothVideoExporter {
         return image
     }
 
-    private static func scaledImage(_ image: CIImage, to outputBounds: CGRect) -> CIImage {
+    private static func upscaledImage(
+        _ image: CIImage,
+        using metalFXUpscaler: MetalFXFrameUpscaler?,
+        to outputBounds: CGRect
+    ) async -> CIImage {
+        if let upscaledImage = await metalFXUpscaler?.upscale(image) {
+            return upscaledImage
+        }
+
+        return compatibilityScaledImage(image, to: outputBounds)
+    }
+
+    private static func compatibilityScaledImage(_ image: CIImage, to outputBounds: CGRect) -> CIImage {
         let scaleX = outputBounds.width / max(1, image.extent.width)
         let scaleY = outputBounds.height / max(1, image.extent.height)
         guard let filter = CIFilter(name: "CILanczosScaleTransform") else {
@@ -217,17 +237,18 @@ enum SmoothVideoExporter {
         amount: Double,
         mode: SmoothVideoInterpolationMode,
         outputBounds: CGRect,
+        metalFXUpscaler: MetalFXFrameUpscaler?,
         opticalFlowInterpolator: MetalOpticalFlowInterpolator?
-    ) -> CIImage {
+    ) async -> CIImage {
         let startCIImage = CIImage(cgImage: startImage)
         let endCIImage = CIImage(cgImage: endImage)
 
         switch mode {
         case .duplicate:
-            return scaledImage(startCIImage, to: outputBounds)
+            return await upscaledImage(startCIImage, using: metalFXUpscaler, to: outputBounds)
         case .blend:
-            let scaledStart = scaledImage(startCIImage, to: outputBounds)
-            let scaledEnd = scaledImage(endCIImage, to: outputBounds)
+            let scaledStart = await upscaledImage(startCIImage, using: metalFXUpscaler, to: outputBounds)
+            let scaledEnd = await upscaledImage(endCIImage, using: metalFXUpscaler, to: outputBounds)
             return blendedImage(from: scaledStart, to: scaledEnd, amount: amount)
         case .opticalFlow:
             guard let predictedImage = opticalFlowPredictedImage(
@@ -236,13 +257,13 @@ enum SmoothVideoExporter {
                 amount: amount,
                 interpolator: opticalFlowInterpolator
             ) else {
-                let scaledStart = scaledImage(startCIImage, to: outputBounds)
-                let scaledEnd = scaledImage(endCIImage, to: outputBounds)
+                let scaledStart = await upscaledImage(startCIImage, using: metalFXUpscaler, to: outputBounds)
+                let scaledEnd = await upscaledImage(endCIImage, using: metalFXUpscaler, to: outputBounds)
                 return blendedImage(from: scaledStart, to: scaledEnd, amount: amount)
             }
 
-            let scaledPredicted = scaledImage(predictedImage, to: outputBounds)
-            let scaledEnd = scaledImage(endCIImage, to: outputBounds)
+            let scaledPredicted = await upscaledImage(predictedImage, using: metalFXUpscaler, to: outputBounds)
+            let scaledEnd = await upscaledImage(endCIImage, using: metalFXUpscaler, to: outputBounds)
             return blendedImage(from: scaledPredicted, to: scaledEnd, amount: amount * 0.25)
         }
     }
@@ -301,6 +322,76 @@ enum SmoothVideoExporter {
                 continue
             }
             request.setComputeDevice(gpu, for: stage)
+        }
+    }
+
+    private final class MetalFXFrameUpscaler {
+        private let upscaler: Upscaler
+        private let inputPixelBufferPool: CVPixelBufferPool
+        private let ciContext: CIContext
+        private let colorSpace: CGColorSpace
+        private let inputBounds: CGRect
+        private let outputBounds: CGRect
+
+        init?(
+            sourceSize: (width: Int, height: Int),
+            outputSize: SmoothVideoExportDimensions,
+            ciContext: CIContext,
+            colorSpace: CGColorSpace
+        ) {
+            guard outputSize.width > sourceSize.width || outputSize.height > sourceSize.height else {
+                return nil
+            }
+
+            let inputSize = CGSize(width: sourceSize.width, height: sourceSize.height)
+            let outputSize = CGSize(width: outputSize.width, height: outputSize.height)
+            guard let upscaler = Upscaler(inputSize: inputSize, outputSize: outputSize) else {
+                return nil
+            }
+
+            var pixelBufferPool: CVPixelBufferPool?
+            let status = CVPixelBufferPoolCreate(
+                nil,
+                nil,
+                [
+                    kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_32BGRA,
+                    kCVPixelBufferMetalCompatibilityKey as String: true,
+                    kCVPixelBufferCGImageCompatibilityKey as String: true,
+                    kCVPixelBufferCGBitmapContextCompatibilityKey as String: true,
+                    kCVPixelBufferWidthKey: sourceSize.width,
+                    kCVPixelBufferHeightKey: sourceSize.height
+                ] as CFDictionary,
+                &pixelBufferPool
+            )
+            guard status == kCVReturnSuccess, let pixelBufferPool else {
+                return nil
+            }
+
+            self.upscaler = upscaler
+            self.inputPixelBufferPool = pixelBufferPool
+            self.ciContext = ciContext
+            self.colorSpace = colorSpace
+            self.inputBounds = CGRect(origin: .zero, size: inputSize)
+            self.outputBounds = CGRect(origin: .zero, size: outputSize)
+        }
+
+        func upscale(_ image: CIImage) async -> CIImage? {
+            guard let inputPixelBuffer = makePixelBuffer(from: inputPixelBufferPool) else {
+                return nil
+            }
+
+            let normalizedImage = image.transformed(
+                by: CGAffineTransform(translationX: -image.extent.minX, y: -image.extent.minY)
+            )
+            ciContext.render(normalizedImage, to: inputPixelBuffer, bounds: inputBounds, colorSpace: colorSpace)
+
+            let outputPixelBuffer = await upscaler.upscale(inputPixelBuffer)
+            guard CVPixelBufferGetWidth(outputPixelBuffer) == Int(outputBounds.width),
+                  CVPixelBufferGetHeight(outputPixelBuffer) == Int(outputBounds.height) else {
+                return nil
+            }
+
+            return CIImage(cvPixelBuffer: outputPixelBuffer).cropped(to: outputBounds)
         }
     }
 

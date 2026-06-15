@@ -2,7 +2,10 @@ import AppKit
 import AVFoundation
 import Foundation
 
+@MainActor
 enum PosterFrameCache {
+    private static let imageCache = NSCache<NSString, NSImage>()
+
     static func generatePoster(for url: URL, assetID: UUID) -> String? {
         do {
             let directory = try posterDirectory()
@@ -24,6 +27,7 @@ enum PosterFrameCache {
             }
 
             try data.write(to: outputURL, options: .atomic)
+            imageCache.setObject(NSImage(cgImage: image, size: .zero), forKey: filename as NSString)
             return filename
         } catch {
             return nil
@@ -36,8 +40,14 @@ enum PosterFrameCache {
             return nil
         }
 
+        if let cachedImage = imageCache.object(forKey: filename as NSString) {
+            return cachedImage
+        }
+
         let url = directory.appendingPathComponent(filename)
-        return NSImage(contentsOf: url)
+        guard let image = NSImage(contentsOf: url) else { return nil }
+        imageCache.setObject(image, forKey: filename as NSString)
+        return image
     }
 
     static func remove(filename: String?) {
@@ -46,6 +56,7 @@ enum PosterFrameCache {
             return
         }
 
+        imageCache.removeObject(forKey: filename as NSString)
         try? FileManager.default.removeItem(at: directory.appendingPathComponent(filename))
     }
 

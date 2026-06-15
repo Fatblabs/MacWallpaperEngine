@@ -526,6 +526,19 @@ public struct PlaylistConfiguration: Codable, Equatable, Sendable {
         assetIDs.insert(contentsOf: moving, at: insertionIndex)
         currentIndex = normalizedCurrentIndex()
     }
+
+    public mutating func remove(_ assetID: UUID) {
+        assetIDs.removeAll { $0 == assetID }
+        if assetIDs.count <= 1 {
+            resetToSingleVideo()
+        } else {
+            currentIndex = normalizedCurrentIndex()
+        }
+    }
+
+    public mutating func resetToSingleVideo() {
+        self = PlaylistConfiguration()
+    }
 }
 
 public struct ThemeSyncConfiguration: Codable, Equatable, Sendable {

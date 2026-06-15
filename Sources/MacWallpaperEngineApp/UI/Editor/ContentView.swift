@@ -767,6 +767,11 @@ private struct PlaylistOrderingPane: View {
                 Text("Sequential Flow")
                     .font(.headline)
                 Spacer()
+                Button("Back to Single Video", role: .destructive) {
+                    resetToSingleVideo()
+                }
+                .buttonStyle(.bordered)
+
                 Menu("Add Video") {
                     ForEach(assets) { candidate in
                         Button(candidate.displayName) {
@@ -786,6 +791,13 @@ private struct PlaylistOrderingPane: View {
                         Text(formattedDuration(playlistAsset.duration))
                             .foregroundStyle(.secondary)
                             .font(.caption)
+                        Button(role: .destructive) {
+                            remove(playlistAsset)
+                        } label: {
+                            Image(systemName: "minus.circle")
+                        }
+                        .buttonStyle(.plain)
+                        .help("Remove from playlist")
                     }
                 }
                 .onMove { source, destination in
@@ -828,6 +840,18 @@ private struct PlaylistOrderingPane: View {
     private func move(from source: IndexSet, to destination: Int) {
         appState.updateEditorConfiguration(for: asset, assets: assets, profiles: profiles, modelContext: modelContext) { configuration in
             configuration.playlist.move(from: source, to: destination)
+        }
+    }
+
+    private func remove(_ playlistAsset: WallpaperAssetRecord) {
+        appState.updateEditorConfiguration(for: asset, assets: assets, profiles: profiles, modelContext: modelContext) { configuration in
+            configuration.playlist.remove(playlistAsset.id)
+        }
+    }
+
+    private func resetToSingleVideo() {
+        appState.updateEditorConfiguration(for: asset, assets: assets, profiles: profiles, modelContext: modelContext) { configuration in
+            configuration.playlist.resetToSingleVideo()
         }
     }
 
@@ -919,7 +943,7 @@ private struct InspectorSidebar: View {
             Divider()
 
             ScrollView {
-                VStack(alignment: .leading, spacing: 14) {
+                LazyVStack(alignment: .leading, spacing: 14) {
                     if let selectedAsset {
                         InspectorHeader(asset: selectedAsset, title: panelTitle)
                         panelContent(for: selectedAsset)

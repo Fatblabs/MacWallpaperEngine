@@ -1,0 +1,33 @@
+{
+  "originHash" : "d96447fbbbd426599c4ae2a09d1931154fda0da59cacbaf98f1b84e172690b57",
+  "pins" : [
+    {
+      "identity" : "fx-upscale",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/finnvoor/fx-upscale.git",
+      "state" : {
+        "revision" : "6655b34a968375d8914896485d13cb4c1797052c",
+        "version" : "1.2.6"
+      }
+    },
+    {
+      "identity" : "swift-argument-parser",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/apple/swift-argument-parser.git",
+      "state" : {
+        "revision" : "6a52f3251125d74daf04fcbd5e6f08a75d074382",
+        "version" : "1.8.2"
+      }
+    },
+    {
+      "identity" : "swifttui",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/Finnvoor/SwiftTUI.git",
+      "state" : {
+        "revision" : "7ab7a7c8f0a30b8c84201903aa8bbbac99a99e9c",
+        "version" : "1.0.4"
+      }
+    }
+  ],
+  "version" : 3
+}

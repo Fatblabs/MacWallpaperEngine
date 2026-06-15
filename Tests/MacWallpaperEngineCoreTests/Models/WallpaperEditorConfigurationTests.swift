@@ -105,6 +105,26 @@ struct WallpaperEditorConfigurationTests {
     }
 
     @Test
+    func playlistCanResetToSingleVideo() {
+        var playlist = PlaylistConfiguration(assetIDs: [UUID(), UUID()], currentIndex: 1, crossfadeDuration: 3)
+
+        playlist.resetToSingleVideo()
+
+        #expect(playlist == PlaylistConfiguration())
+    }
+
+    @Test
+    func playlistRemovingLastExtraItemCollapsesToSingleVideo() {
+        let first = UUID()
+        let second = UUID()
+        var playlist = PlaylistConfiguration(assetIDs: [first, second], currentIndex: 1)
+
+        playlist.remove(second)
+
+        #expect(playlist == PlaylistConfiguration())
+    }
+
+    @Test
     func invisibleOrEmptyWidgetsDoNotEmitVisibleContent() {
         var clock = DesktopWidgetConfiguration.clock()
         clock.clock.showTime = false
