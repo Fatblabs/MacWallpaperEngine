@@ -3,79 +3,6 @@ import MacWallpaperEngineCore
 import SwiftData
 import SwiftUI
 
-struct TrimEditorSection: View {
-    let asset: WallpaperAssetRecord
-    @Binding var configuration: WallpaperEditorConfiguration
-
-    private var duration: Double {
-        max(0, asset.duration)
-    }
-
-    var body: some View {
-        EditorSectionCard(title: "Snippet") {
-            if VideoTrimConfiguration.shouldShowTrimControls(duration: duration) {
-                VStack(alignment: .leading, spacing: 12) {
-                    DualHandleRangeSlider(
-                        lowerValue: trimStartBinding,
-                        upperValue: trimEndBinding,
-                        bounds: 0...max(1, duration),
-                        minimumDistance: 0.5
-                    )
-
-                    HStack {
-                        TimeValueField(title: "Start", value: trimStartBinding, upperBound: max(0, duration - 0.5))
-                        TimeValueField(title: "End", value: trimEndBinding, upperBound: duration)
-                    }
-
-                    Text("Videos longer than 60 seconds can loop a precise snippet. Short clips loop as-is.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            } else {
-                Text("This clip is short enough to loop as-is. Trim controls appear for videos 60 seconds or longer.")
-                    .foregroundStyle(.secondary)
-            }
-        }
-    }
-
-    private var trimStartBinding: Binding<Double> {
-        Binding {
-            configuration.videoTrim.normalized(forDuration: duration).startSeconds
-        } set: { newValue in
-            let end = configuration.videoTrim.effectiveEndSeconds(forDuration: duration)
-            configuration.videoTrim.startSeconds = min(max(0, newValue), max(0, end - 0.5))
-            configuration.videoTrim.endSeconds = max(configuration.videoTrim.startSeconds + 0.5, end)
-        }
-    }
-
-    private var trimEndBinding: Binding<Double> {
-        Binding {
-            configuration.videoTrim.effectiveEndSeconds(forDuration: duration)
-        } set: { newValue in
-            let start = configuration.videoTrim.normalized(forDuration: duration).startSeconds
-            configuration.videoTrim.endSeconds = min(max(start + 0.5, newValue), duration)
-        }
-    }
-}
-
-private struct TimeValueField: View {
-    let title: String
-    @Binding var value: Double
-    let upperBound: Double
-
-    var body: some View {
-        Stepper(value: $value, in: 0...max(0, upperBound), step: 0.1) {
-            LabeledContent(title, value: formatted(value))
-        }
-        .frame(maxWidth: 260)
-    }
-
-    private func formatted(_ value: Double) -> String {
-        let totalTenths = Int((value * 10).rounded())
-        let totalSeconds = totalTenths / 10
-        return "\(totalSeconds / 60):\(String(format: "%02d", totalSeconds % 60)).\(totalTenths % 10)"
-    }
-}
 
 struct ColorEditorSection: View {
     @Binding var configuration: WallpaperEditorConfiguration
@@ -265,6 +192,9 @@ struct InstalledFontPicker: View {
 
     var body: some View {
         Picker(title, selection: $selection) {
+            if !Self.fonts.contains(selection) {
+                Text(selection).tag(selection)
+            }
             ForEach(Self.fonts, id: \.self) { fontName in
                 Text(fontName).tag(fontName)
             }

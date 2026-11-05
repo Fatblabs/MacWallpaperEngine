@@ -198,6 +198,8 @@ final class WidgetRuntimeHost {
         var kind: DesktopWidgetKind
         var module: DesktopWidgetModule
         var layer: CATextLayer
+        var lastConfiguration: DesktopWidgetConfiguration?
+        var lastUpdate = Date.distantPast
     }
 
     private var hostedWidgets: [UUID: HostedWidget] = [:]
@@ -207,13 +209,14 @@ final class WidgetRuntimeHost {
         self.registry = registry
     }
 
-    func render(widgets: [DesktopWidgetConfiguration], on parentLayer: CALayer?, bounds: CGRect) {
+    func render(widgets: [DesktopWidgetConfiguration], on parentLayer: CALayer?, bounds: CGRect, now: Date = Date()) {
         guard let parentLayer else {
             unloadAll()
             return
         }
 
-        let context = WidgetRenderContext.current(bounds: bounds)
+        var context = WidgetRenderContext.current(bounds: bounds)
+        context.now = now
         let activeWidgets = widgets.filter(\.emitsVisibleContent)
         let activeIDs = Set(activeWidgets.map(\.id))
 
@@ -222,11 +225,18 @@ final class WidgetRuntimeHost {
         }
 
         for widget in activeWidgets {
-            let hosted = hostedWidget(for: widget, context: context)
+            var hosted = hostedWidget(for: widget, context: context)
             if hosted.layer.superlayer == nil {
                 parentLayer.addSublayer(hosted.layer)
             }
-            hosted.module.update(layer: hosted.layer, widget: widget, context: context)
+            let minimumInterval: Double = widget.kind == .clock ? 1 : (widget.kind == .weather ? 1_800 : 2)
+            let interval = widget.refresh.intervalSeconds.isFinite ? max(minimumInterval, widget.refresh.intervalSeconds) : minimumInterval
+            if hosted.lastConfiguration != widget || now.timeIntervalSince(hosted.lastUpdate) >= interval {
+                hosted.module.update(layer: hosted.layer, widget: widget, context: context)
+                hosted.lastConfiguration = widget
+                hosted.lastUpdate = now
+            }
+            hosted.layer.frame = WidgetRuntimeLayout.frame(for: widget, in: bounds)
             hostedWidgets[widget.id] = hosted
         }
     }
@@ -258,9 +268,10 @@ final class WidgetRuntimeHost {
     }
 }
 
-private enum WidgetRuntimeLayout {
+enum WidgetRuntimeLayout {
     static func frame(for widget: DesktopWidgetConfiguration, in bounds: CGRect) -> CGRect {
-        let size = CGSize(width: 310 * widget.style.scale, height: 84 * widget.style.scale)
+        let scale = widget.style.scale.isFinite ? max(0.1, widget.style.scale) : 1
+        let size = CGSize(width: min(bounds.width, 310 * scale), height: min(bounds.height, 84 * scale))
 
         if !widget.layout.isAnchorLocked || widget.layout.anchor == .absolute {
             return CGRect(
@@ -286,7 +297,9 @@ private enum WidgetRuntimeLayout {
             origin = CGPoint(x: bounds.width - size.width - inset, y: inset)
         }
 
-        return CGRect(origin: origin, size: size)
+        return CGRect(x: min(max(0, origin.x), max(0, bounds.width - size.width)),
+                      y: min(max(0, origin.y), max(0, bounds.height - size.height)),
+                      width: size.width, height: size.height)
     }
 }
 

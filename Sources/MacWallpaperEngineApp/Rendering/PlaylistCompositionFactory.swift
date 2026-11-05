@@ -86,7 +86,10 @@ enum PlaylistCompositionFactory {
         }
         let videoComposition = AVMutableVideoComposition()
         videoComposition.renderSize = renderSize
-        videoComposition.frameDuration = CMTime(value: 1, timescale: 30)
+        let currentFPS = (try? await currentTrack.load(.nominalFrameRate)) ?? 30
+        let nextFPS = (try? await nextTrack.load(.nominalFrameRate)) ?? currentFPS
+        let fps = max(currentFPS, nextFPS)
+        videoComposition.frameDuration = CMTime(seconds: 1 / Double(fps.isFinite && fps > 0 ? min(500, fps) : 30), preferredTimescale: 60_000)
 
         let beforeInstruction = AVMutableVideoCompositionInstruction()
         beforeInstruction.timeRange = CMTimeRange(start: .zero, end: fadeStart)

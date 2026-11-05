@@ -21,7 +21,7 @@ struct MacWallpaperEngineApp: App {
     }()
 
     var body: some Scene {
-        WindowGroup("MacWallpaperEngine") {
+        Window("MacWallpaperEngine", id: "library") {
             ContentView()
                 .environmentObject(appState)
                 .modelContainer(modelContainer)
@@ -29,15 +29,15 @@ struct MacWallpaperEngineApp: App {
                 .task {
                     appState.bootstrapFromStore(modelContext: modelContainer.mainContext)
                 }
-        }
-        .commands {
-            CommandGroup(replacing: .appSettings) {
-                Button("Settings...") {
-                    NSApp.activate(ignoringOtherApps: true)
-                    NSApp.windows.first?.makeKeyAndOrderFront(nil)
+                .onOpenURL { appState.importVideo($0, modelContext: modelContainer.mainContext) }
+                .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
+                    appState.stop()
                 }
-                .keyboardShortcut(",", modifiers: .command)
-            }
+        }
+        Settings {
+            SettingsView()
+                .environmentObject(appState)
+                .modelContainer(modelContainer)
         }
 
         MenuBarExtra("MacWallpaperEngine", systemImage: "play.rectangle.on.rectangle") {
@@ -49,18 +49,14 @@ struct MacWallpaperEngineApp: App {
     }
 
     private static func modelStoreURL() throws -> URL {
-        let supportDirectory = applicationSupportDirectory()
+        let supportDirectory = AppStorage.root
         try FileManager.default.createDirectory(at: supportDirectory, withIntermediateDirectories: true)
 
         let storeURL = supportDirectory.appendingPathComponent("MacWallpaperEngine.store")
-        migrateLegacyDefaultStoreIfNeeded(to: storeURL)
+        if ProcessInfo.processInfo.environment["MACWALLPAPERENGINE_DATA_DIRECTORY"] == nil {
+            migrateLegacyDefaultStoreIfNeeded(to: storeURL)
+        }
         return storeURL
-    }
-
-    private static func applicationSupportDirectory() -> URL {
-        let baseURL = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
-            ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support")
-        return baseURL.appendingPathComponent("MacWallpaperEngine", isDirectory: true)
     }
 
     private static func migrateLegacyDefaultStoreIfNeeded(to storeURL: URL) {

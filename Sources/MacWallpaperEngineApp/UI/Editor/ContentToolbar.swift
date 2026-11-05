@@ -34,8 +34,10 @@ struct ContentToolbar: ToolbarContent {
             Button {
                 columnVisibility = columnVisibility == .all ? .doubleColumn : .all
             } label: {
-                Label("Inspector", systemImage: "sidebar.right")
+                Label("Library Sidebar", systemImage: "sidebar.left")
             }
+            .help("Toggle Library Sidebar")
+            SettingsLink { Label("Settings", systemImage: "gearshape") }
         }
     }
 }
@@ -84,7 +86,7 @@ private struct ResolutionToolbarMenu: View {
             Label(asset?.editorConfiguration.canvasResolution.displayTitle ?? "Resolution", systemImage: "aspectratio")
         }
         .disabled(asset == nil)
-        .help("Wallpaper output canvas resolution")
+        .help("Preview canvas size; use Generate Smooth Copy to change video resolution")
     }
 
     private func setResolution(_ resolution: WallpaperCanvasResolution) {

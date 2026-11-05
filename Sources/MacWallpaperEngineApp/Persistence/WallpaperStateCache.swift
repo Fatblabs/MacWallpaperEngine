@@ -1,6 +1,7 @@
 import Foundation
 import MacWallpaperEngineCore
 
+@MainActor
 enum WallpaperStateCache {
     private static let defaultsKey = "MacWallpaperEngine.persistentWallpaperSnapshot"
     private static let filename = "WallpaperStateSnapshot.json"
@@ -11,7 +12,7 @@ enum WallpaperStateCache {
             return snapshot
         }
 
-        guard let data = UserDefaults.standard.data(forKey: defaultsKey) else {
+        guard let data = AppStorage.defaults.data(forKey: defaultsKey) else {
             return nil
         }
 
@@ -47,17 +48,25 @@ enum WallpaperStateCache {
             }
         )
 
-        guard let data = try? JSONEncoder().encode(snapshot) else {
+        if let previous = load(), previous.activeAssetIDs == snapshot.activeAssetIDs,
+           previous.assets == snapshot.assets, previous.displayAssignments == snapshot.displayAssignments {
+            return previous
+        }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = .sortedKeys
+        guard let data = try? encoder.encode(snapshot) else {
             return nil
         }
 
-        UserDefaults.standard.set(data, forKey: defaultsKey)
-        saveToFile(data)
+        if AppStorage.defaults.data(forKey: defaultsKey) != data {
+            AppStorage.defaults.set(data, forKey: defaultsKey)
+            saveToFile(data)
+        }
         return snapshot
     }
 
     static func clear() {
-        UserDefaults.standard.removeObject(forKey: defaultsKey)
+        AppStorage.defaults.removeObject(forKey: defaultsKey)
         try? FileManager.default.removeItem(at: snapshotFileURL())
     }
 
@@ -70,15 +79,11 @@ enum WallpaperStateCache {
             )
             try data.write(to: url, options: [.atomic])
         } catch {
-            UserDefaults.standard.set(data, forKey: defaultsKey)
+            AppStorage.defaults.set(data, forKey: defaultsKey)
         }
     }
 
     private static func snapshotFileURL() -> URL {
-        let baseURL = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
-            ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support")
-        return baseURL
-            .appendingPathComponent("MacWallpaperEngine", isDirectory: true)
-            .appendingPathComponent(filename)
+        AppStorage.root.appendingPathComponent(filename)
     }
 }

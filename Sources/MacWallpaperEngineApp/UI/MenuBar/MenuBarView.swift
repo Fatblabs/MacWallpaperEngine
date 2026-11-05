@@ -3,6 +3,7 @@ import SwiftUI
 
 struct MenuBarView: View {
     @Environment(\.modelContext) private var modelContext
+    @Environment(\.openWindow) private var openWindow
     @EnvironmentObject private var appState: AppState
     @Query(sort: \WallpaperAssetRecord.createdAt, order: .reverse) private var assets: [WallpaperAssetRecord]
     @Query private var profiles: [DisplayProfileRecord]
@@ -55,10 +56,13 @@ struct MenuBarView: View {
 
             Divider()
 
-            Button("Open Settings") {
+            Button("Open Library") {
                 NSApp.activate(ignoringOtherApps: true)
-                NSApp.windows.first?.makeKeyAndOrderFront(nil)
+                openWindow(id: "library")
             }
+            SettingsLink { Text("Settings...") }
+            Button("Use System Wallpaper") { appState.setAsset(nil, for: nil, modelContext: modelContext) }
+            OperationStatusView()
 
             Button("Quit") {
                 NSApp.terminate(nil)
@@ -66,6 +70,10 @@ struct MenuBarView: View {
         }
         .padding()
         .frame(width: 320)
+        .dropDestination(for: URL.self) { urls, _ in
+            urls.forEach { appState.importVideo($0, modelContext: modelContext) }
+            return !urls.isEmpty
+        }
         .onAppear {
             if assets.isEmpty {
                 appState.bootstrapFromStore(modelContext: modelContext)

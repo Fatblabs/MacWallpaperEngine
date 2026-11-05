@@ -10,10 +10,16 @@ import QuartzCore
 @MainActor
 final class WallpaperCoordinator {
     private var controllers: [UInt32: WallpaperWindowController] = [:]
-    private let logger = Logger(subsystem: "MacWallpaperEngine", category: "WallpaperCoordinator")
+    private var widgetConfiguration = WidgetOverlayConfiguration()
+    private var isEditing = false
 
     var activeDisplayIDs: [UInt32] {
-        Array(controllers.keys)
+        controllers.compactMap { $0.value.isVisible ? $0.key : nil }
+    }
+
+    func stop() {
+        controllers.values.forEach { $0.close() }
+        controllers.removeAll()
     }
 
     func prepareForImmediateDisplay() {
@@ -33,7 +39,10 @@ final class WallpaperCoordinator {
         }
 
         for display in displays where controllers[display.id] == nil {
-            controllers[display.id] = WallpaperWindowController(display: display)
+            let controller = WallpaperWindowController(display: display)
+            controller.setWidgetConfiguration(widgetConfiguration)
+            controller.setEditMode(isEditing)
+            controllers[display.id] = controller
         }
     }
 
@@ -60,12 +69,14 @@ final class WallpaperCoordinator {
     }
 
     func setEditMode(_ isEnabled: Bool) {
+        isEditing = isEnabled
         for controller in controllers.values {
             controller.setEditMode(isEnabled)
         }
     }
 
     func setWidgetConfiguration(_ configuration: WidgetOverlayConfiguration) {
+        widgetConfiguration = configuration
         for controller in controllers.values {
             controller.setWidgetConfiguration(configuration)
         }
@@ -73,7 +84,7 @@ final class WallpaperCoordinator {
 }
 
 @MainActor
-private final class WallpaperWindowController {
+final class WallpaperWindowController {
     private var display: WallpaperDisplay
     private let window: NSWindow
     private let videoView = VideoWallpaperView()
@@ -95,7 +106,6 @@ private final class WallpaperWindowController {
 
         configureWindow()
         window.contentView = videoView
-        window.orderBack(nil)
     }
 
     func close() {
@@ -111,7 +121,6 @@ private final class WallpaperWindowController {
     }
 
     func prepareForImmediateDisplay() {
-        window.orderBack(nil)
         videoView.prepareForImmediateDisplay()
     }
 
@@ -119,7 +128,6 @@ private final class WallpaperWindowController {
         self.display = display
         window.setFrame(display.frame, display: true)
         window.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
-        window.orderBack(nil)
     }
 
     func setVideo(
@@ -136,20 +144,32 @@ private final class WallpaperWindowController {
                 activeEditorConfiguration != editorConfiguration else {
             return
         }
+        let needsNewPlayer = activeURL != url || activeDuration != assetDuration ||
+            activePlaylistItems != playlistItems ||
+            activeEditorConfiguration.videoTrim != editorConfiguration.videoTrim ||
+            activeEditorConfiguration.playlist != editorConfiguration.playlist
         activeURL = url
         activeDuration = assetDuration
         activePlaylistItems = playlistItems
         activeLayoutMode = layoutMode
         activeEditorConfiguration = editorConfiguration
-        videoView.setVideo(
+        if needsNewPlayer {
+            videoView.setVideo(
             url: url,
             assetDuration: assetDuration,
             playlistItems: playlistItems,
             layoutMode: layoutMode,
             editorConfiguration: editorConfiguration
-        )
-        window.orderBack(nil)
+            )
+        } else {
+            videoView.setLayoutMode(layoutMode)
+            videoView.setEditorConfiguration(editorConfiguration)
+        }
+        if url == nil { window.orderOut(nil) } else { window.orderBack(nil) }
     }
+
+    var playbackIdentity: ObjectIdentifier? { videoView.playbackIdentity }
+    var isVisible: Bool { window.isVisible }
 
     func apply(_ mode: PlaybackMode) {
         videoView.apply(mode)
@@ -178,7 +198,7 @@ private final class WallpaperWindowController {
 }
 
 @MainActor
-private final class VideoWallpaperView: NSView {
+final class VideoWallpaperView: NSView {
     private let logger = Logger(subsystem: "MacWallpaperEngine", category: "VideoWallpaperView")
     private var queuePlayer: AVQueuePlayer?
     private var looper: AVPlayerLooper?
@@ -207,10 +227,29 @@ private final class VideoWallpaperView: NSView {
     private var sourceFrameRate: Double = 0
     private var enqueueGeneration = 0
     private var frameRateCappedItemIDs: Set<ObjectIdentifier> = []
+    private var uncappedCompositions: [ObjectIdentifier: AVVideoComposition] = [:]
+    private var capTask: Task<Void, Never>?
+    private var capRevision = 0
+    private var capSignature: String?
+    private var currentItemObservation: NSKeyValueObservation?
+    private var playlistItemIDs: Set<ObjectIdentifier> = []
+    private var isEnqueuing = false
     private var securityScopedURL: URL?
     private var securityScopeIsActive = false
 
     private(set) var layoutMode: WallpaperLayoutMode = .fill
+
+    var playbackIdentity: ObjectIdentifier? { queuePlayer.map(ObjectIdentifier.init) }
+    var playbackFrameDuration: CMTime? { queuePlayer?.currentItem?.videoComposition?.frameDuration }
+    var playbackRate: Float { queuePlayer?.rate ?? 0 }
+    var hasActiveTimers: Bool { widgetTimer != nil || interactionTimer != nil }
+    private var isAnimating: Bool {
+        guard queuePlayer != nil else { return false }
+        switch lastPlaybackMode {
+        case .full, .capped: return true
+        case .paused, .posterFrame: return false
+        }
+    }
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -254,6 +293,14 @@ private final class VideoWallpaperView: NSView {
     ) {
         stopSecurityScope()
         removePlaylistObserver()
+        queuePlayer?.pause()
+        currentItemObservation = nil
+        capTask?.cancel()
+        capRevision += 1
+        capSignature = nil
+        uncappedCompositions.removeAll()
+        playlistItemIDs.removeAll()
+        isEnqueuing = false
         enqueueGeneration += 1
         let generation = enqueueGeneration
         self.layoutMode = layoutMode
@@ -313,6 +360,7 @@ private final class VideoWallpaperView: NSView {
 
         playerLayer?.removeFromSuperlayer()
         self.queuePlayer = player
+        observeCurrentItem(player)
         self.looper = looper
         self.loopTemplateItem = item
         self.frameRateCappedItemIDs.removeAll()
@@ -353,6 +401,7 @@ private final class VideoWallpaperView: NSView {
 
         playerLayer?.removeFromSuperlayer()
         queuePlayer = player
+        observeCurrentItem(player)
         looper = nil
         loopTemplateItem = nil
         frameRateCappedItemIDs.removeAll()
@@ -368,6 +417,7 @@ private final class VideoWallpaperView: NSView {
     }
 
     func apply(_ mode: PlaybackMode) {
+        guard lastPlaybackMode != mode else { return }
         lastPlaybackMode = mode
         play(for: mode)
     }
@@ -383,6 +433,9 @@ private final class VideoWallpaperView: NSView {
         case .posterFrame, .paused:
             queuePlayer?.pause()
         }
+        updateWidgetTimer()
+        updateInteractionMonitoring()
+        updateCloudAnimation()
     }
 
     func setEditMode(_ isEnabled: Bool) {
@@ -406,12 +459,25 @@ private final class VideoWallpaperView: NSView {
     }
 
     func setEditorConfiguration(_ configuration: WallpaperEditorConfiguration) {
+        guard editorConfiguration != configuration else { return }
         editorConfiguration = configuration
         updateEditorPresentation()
-        apply(lastPlaybackMode)
+        play(for: lastPlaybackMode)
+    }
+
+    func setLayoutMode(_ mode: WallpaperLayoutMode) {
+        layoutMode = mode
+        playerLayer?.videoGravity = mode.videoGravity
     }
 
     func prepareForClose() {
+        enqueueGeneration += 1
+        capRevision += 1
+        capTask?.cancel()
+        currentItemObservation = nil
+        queuePlayer?.pause()
+        cloudLayer.removeAllAnimations()
+        clickPulseLayer.removeAllAnimations()
         widgetTimer?.invalidate()
         widgetTimer = nil
         interactionTimer?.invalidate()
@@ -520,7 +586,8 @@ private final class VideoWallpaperView: NSView {
     }
 
     private func enqueuePlaylistItems(startingAt startIndex: Int, minimumQueuedItems: Int) {
-        guard let queuePlayer, !playlistItems.isEmpty else { return }
+        guard let queuePlayer, !playlistItems.isEmpty, !isEnqueuing else { return }
+        isEnqueuing = true
 
         let generation = enqueueGeneration
         let items = playlistItems
@@ -528,6 +595,7 @@ private final class VideoWallpaperView: NSView {
 
         Task { @MainActor [weak self] in
             guard let self else { return }
+            defer { if self.enqueueGeneration == generation { self.isEnqueuing = false } }
 
             var queuedCount = queuePlayer.items().count
             var nextIndex = (startIndex + queuedCount) % items.count
@@ -547,7 +615,9 @@ private final class VideoWallpaperView: NSView {
                     return
                 }
 
+                self.playlistItemIDs.insert(ObjectIdentifier(item))
                 queuePlayer.insert(item, after: nil)
+                self.updateFrameRateCap(for: self.lastPlaybackMode)
                 queuedCount = queuePlayer.items().count
                 nextIndex = (nextIndex + 1) % items.count
             }
@@ -561,10 +631,11 @@ private final class VideoWallpaperView: NSView {
             object: nil,
             queue: .main
         ) { [weak self] notification in
-            let isPlayerItemNotification = notification.object is AVPlayerItem
+            let itemID = (notification.object as? AVPlayerItem).map(ObjectIdentifier.init)
             Task { @MainActor in
                 guard let self,
-                      isPlayerItemNotification,
+                      let itemID,
+                      self.playlistItemIDs.remove(itemID) != nil,
                       self.playlistItems.count > 1 else {
                     return
                 }
@@ -691,9 +762,9 @@ private final class VideoWallpaperView: NSView {
     }
 
     private func updateWidgetTimer() {
-        let shouldRun = !editorConfiguration.activeWidgets.isEmpty ||
-            widgetConfiguration.isEnabled ||
-            (editorConfiguration.layers.showWidgets && editorConfiguration.clockCalendar.isEnabled)
+        let shouldRun = isAnimating && (widgetConfiguration.isEnabled ||
+            (editorConfiguration.layers.showWidgets &&
+                (!editorConfiguration.activeWidgets.isEmpty || editorConfiguration.clockCalendar.isEnabled)))
 
         if shouldRun, widgetTimer == nil {
             widgetTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
@@ -769,34 +840,57 @@ private final class VideoWallpaperView: NSView {
             playbackRate: editorConfiguration.clampedPlaybackSpeed,
             targetFPS: targetFPS
         )
+        if looper != nil, sourceFrameRate > 0, Double(targetFPS) >= sourceFrameRate * editorConfiguration.clampedPlaybackSpeed {
+            clearFrameRateCap()
+            return
+        }
         applyFrameRateCap(maximumRealFPS: effectiveMaximumFPS, generation: enqueueGeneration)
+    }
+
+    private func observeCurrentItem(_ player: AVQueuePlayer) {
+        currentItemObservation = player.observe(\.currentItem, options: [.new]) { [weak self] _, _ in
+            Task { @MainActor in
+                guard let self else { return }
+                self.updateFrameRateCap(for: self.lastPlaybackMode)
+            }
+        }
     }
 
     private func applyFrameRateCap(maximumRealFPS: Int, generation: Int) {
         let playbackRate = editorConfiguration.clampedPlaybackSpeed
         let items = playerItemsForFrameRateCap()
-
-        Task { @MainActor [weak self] in
+        let signature = "\(maximumRealFPS)-\(playbackRate)-\(items.map { ObjectIdentifier($0) })"
+        guard capSignature != signature else { return }
+        capSignature = signature
+        capTask?.cancel()
+        capRevision += 1
+        let revision = capRevision
+        let activeIDs = Set(items.map(ObjectIdentifier.init))
+        uncappedCompositions = uncappedCompositions.filter { activeIDs.contains($0.key) }
+        frameRateCappedItemIDs.formIntersection(activeIDs)
+        capTask = Task { @MainActor [weak self] in
             guard let self else { return }
 
             for item in items {
-                guard self.enqueueGeneration == generation,
+                guard !Task.isCancelled, self.capRevision == revision, self.enqueueGeneration == generation,
                       self.playerItemsForFrameRateCap().contains(where: { $0 === item }) else {
                     return
                 }
 
                 let itemID = ObjectIdentifier(item)
-                if item.videoComposition != nil && !self.frameRateCappedItemIDs.contains(itemID) {
-                    continue
+                if !self.frameRateCappedItemIDs.contains(itemID), self.looper == nil,
+                   let original = item.videoComposition {
+                    self.uncappedCompositions[itemID] = original
                 }
 
                 do {
                     let composition = try await Self.cappedVideoComposition(
                         for: item.asset,
+                        original: self.uncappedCompositions[itemID],
                         maximumRealFPS: maximumRealFPS,
                         playbackRate: playbackRate
                     )
-                    guard self.enqueueGeneration == generation,
+                    guard !Task.isCancelled, self.capRevision == revision, self.enqueueGeneration == generation,
                           self.playerItemsForFrameRateCap().contains(where: { $0 === item }) else {
                         return
                     }
@@ -811,16 +905,20 @@ private final class VideoWallpaperView: NSView {
     }
 
     private func clearFrameRateCap() {
-        guard !frameRateCappedItemIDs.isEmpty else { return }
+        capTask?.cancel()
+        capTask = nil
+        capRevision += 1
+        capSignature = nil
 
         for item in playerItemsForFrameRateCap() {
             let itemID = ObjectIdentifier(item)
-            if frameRateCappedItemIDs.contains(itemID) {
-                item.videoComposition = nil
+            if frameRateCappedItemIDs.contains(itemID) || looper != nil {
+                item.videoComposition = uncappedCompositions[itemID]
             }
         }
 
         frameRateCappedItemIDs.removeAll()
+        uncappedCompositions.removeAll()
     }
 
     private func playerItemsForFrameRateCap() -> [AVPlayerItem] {
@@ -844,14 +942,20 @@ private final class VideoWallpaperView: NSView {
 
     private static func cappedVideoComposition(
         for asset: AVAsset,
+        original: AVVideoComposition?,
         maximumRealFPS: Int,
         playbackRate: Double
     ) async throws -> AVMutableVideoComposition {
-        let composition = try await videoComposition(for: asset)
+        let composition: AVMutableVideoComposition
+        if let original = original?.mutableCopy() as? AVMutableVideoComposition {
+            composition = original
+        } else {
+            composition = try await videoComposition(for: asset)
+        }
         composition.sourceTrackIDForFrameTiming = kCMPersistentTrackID_Invalid
         composition.frameDuration = CMTime(
             seconds: max(0.001, playbackRate / Double(max(1, maximumRealFPS))),
-            preferredTimescale: 600
+            preferredTimescale: 60_000
         )
         return composition
     }
@@ -981,7 +1085,7 @@ private final class VideoWallpaperView: NSView {
 
     private func updateCloudAnimation() {
         cloudLayer.removeAnimation(forKey: "cloud-drift")
-        guard editorConfiguration.layers.showMovingClouds else { return }
+        guard isAnimating, editorConfiguration.layers.showMovingClouds else { return }
 
         let animation = CABasicAnimation(keyPath: "position.x")
         animation.fromValue = cloudLayer.position.x - 60
@@ -995,9 +1099,14 @@ private final class VideoWallpaperView: NSView {
 
     private func updateInteractionMonitoring() {
         let interactions = editorConfiguration.mouseInteraction
-        cursorLayer.isHidden = !interactions.particlesFollowMouse
+        cursorLayer.isHidden = !isAnimating || !interactions.particlesFollowMouse
+        if !isAnimating || !interactions.parallaxDepth {
+            cloudLayer.setAffineTransform(.identity)
+            customTextLayer.setAffineTransform(.identity)
+        }
+        if !isAnimating { clickPulseLayer.removeAllAnimations() }
 
-        if interactions.particlesFollowMouse || interactions.parallaxDepth {
+        if isAnimating && (interactions.particlesFollowMouse || interactions.parallaxDepth) {
             if interactionTimer == nil {
                 interactionTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
                     Task { @MainActor in
@@ -1012,7 +1121,7 @@ private final class VideoWallpaperView: NSView {
             customTextLayer.setAffineTransform(.identity)
         }
 
-        if interactions.clickReactions {
+        if isAnimating && interactions.clickReactions {
             if clickEventMonitor == nil {
                 clickEventMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] event in
                     Task { @MainActor in

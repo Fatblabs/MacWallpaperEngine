@@ -14,7 +14,6 @@ struct ContentView: View {
     @State private var selectedWidgetID: UUID?
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
     @State private var isDropTargeted = false
-    @State private var didInitializeSelection = false
 
     private var selectedAsset: WallpaperAssetRecord? {
         if let selectedAssetID,
@@ -54,16 +53,20 @@ struct ContentView: View {
         return assetIDs.contains(selectedAssetID)
     }
 
-    private var editorFingerprints: [String] {
-        assets.map(\.editorFingerprint)
-    }
-
     var body: some View {
         ContentWorkspace(
             selectedAsset: selectedAsset,
             assets: assets,
             profiles: profiles,
-            selectedAssetID: $selectedAssetID,
+            selectedAssetID: Binding(
+                get: { selectedAssetID },
+                set: { id in
+                    selectedAssetID = id
+                    if let selected = assets.first(where: { $0.id == id }) {
+                        appState.setAsset(selected, for: nil, modelContext: modelContext)
+                    }
+                }
+            ),
             selectedWidgetID: $selectedWidgetID,
             columnVisibility: $columnVisibility,
             isDropTargeted: $isDropTargeted
@@ -94,18 +97,10 @@ struct ContentView: View {
             if !hasValidSelection {
                 selectedAssetID = preferredSelectedAssetID
             }
-            didInitializeSelection = true
             appState.start()
         }
-        .onChange(of: selectedAssetID) { oldValue, newValue in
-            guard didInitializeSelection,
-                  oldValue != nil,
-                  let newValue,
-                  let selected = assets.first(where: { $0.id == newValue }) else {
-                return
-            }
-
-            appState.setAsset(selected, for: nil, modelContext: modelContext)
+        .onChange(of: selectedAssetID) {
+            selectedWidgetID = nil
         }
         .onChange(of: assetIDs) {
             if !hasValidSelection {
@@ -113,14 +108,13 @@ struct ContentView: View {
             }
             appState.reconcile(assets: assets, profiles: profiles)
         }
-        .onChange(of: editorFingerprints) {
-            appState.reconcile(assets: assets, profiles: profiles)
-        }
         .onChange(of: profileFingerprints) {
             appState.reconcile(assets: assets, profiles: profiles)
         }
-        .onReceive(Timer.publish(every: 60, on: .main, in: .common).autoconnect()) { _ in
-            appState.reconcile(assets: assets, profiles: profiles)
+        .safeAreaInset(edge: .bottom) {
+            if appState.exportStatus != nil || appState.lastErrorMessage != nil {
+                OperationStatusView().padding(12).background(.bar)
+            }
         }
     }
 }
@@ -150,7 +144,7 @@ private struct ContentWorkspace: View {
                 profiles: profiles,
                 selectedWidgetID: $selectedWidgetID
             )
-            .navigationSplitViewColumnWidth(min: 480, ideal: 780)
+            .navigationSplitViewColumnWidth(min: 360, ideal: 650)
         } detail: {
             InspectorSidebar(
                 selectedAsset: selectedAsset,
@@ -158,7 +152,7 @@ private struct ContentWorkspace: View {
                 profiles: profiles,
                 selectedWidgetID: $selectedWidgetID
             )
-            .navigationSplitViewColumnWidth(min: 340, ideal: 400, max: 520)
+            .navigationSplitViewColumnWidth(min: 380, ideal: 420, max: 520)
         }
     }
 }
@@ -219,6 +213,9 @@ private struct MasterLibrarySidebar: View {
                         SidebarAssetRow(asset: asset)
                             .tag(Optional(asset.id))
                             .contextMenu {
+                                Button("Apply to All Displays") {
+                                    appState.setAsset(asset, for: nil, modelContext: modelContext)
+                                }
                                 Button {
                                     appState.revealWallpaperFile(asset)
                                 } label: {
@@ -255,7 +252,6 @@ private struct MasterLibrarySidebar: View {
     }
 
     private func remove(_ asset: WallpaperAssetRecord) {
-        selectedAssetID = assets.first { $0.id != asset.id }?.id
         appState.removeWallpaper(asset, assets: assets, profiles: profiles, modelContext: modelContext)
     }
 }
@@ -464,8 +460,10 @@ private struct ContextualLowerPane: View {
         VStack(alignment: .leading, spacing: 12) {
             if asset.editorConfiguration.playlist.isMultiVideo {
                 PlaylistOrderingPane(asset: asset, assets: assets, profiles: profiles)
+                SmoothCopyMenu(asset: asset)
             } else if VideoTrimConfiguration.shouldShowTrimControls(duration: asset.duration) {
                 TrimmingOptimizationPane(asset: asset, assets: assets, profiles: profiles)
+                QuickFlowPane(asset: asset, assets: assets, profiles: profiles, selectedWidgetID: $selectedWidgetID)
             } else {
                 QuickFlowPane(asset: asset, assets: assets, profiles: profiles, selectedWidgetID: $selectedWidgetID)
             }
@@ -503,7 +501,6 @@ private struct TrimmingOptimizationPane: View {
                 Text("Timeline Trimmer")
                     .font(.headline)
                 Spacer()
-                SmoothCopyMenu(asset: asset)
                 Button("Export Optimized Snippet") {
                     appState.exportOptimizedSnippet(
                         for: asset,
@@ -526,6 +523,12 @@ private struct TrimmingOptimizationPane: View {
             Text("Selection is capped to 30-60 seconds when the source is long, so exported snippets are easier on battery and RAM.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+            Button("Restore Full-Length Playback") {
+                appState.updateEditorConfiguration(for: asset, assets: assets, profiles: profiles, modelContext: modelContext) {
+                    $0.videoTrim = VideoTrimConfiguration()
+                }
+            }
+            .disabled(configuration.videoTrim == VideoTrimConfiguration())
         }
     }
 
@@ -1002,8 +1005,15 @@ private struct InspectorSidebar: View {
                 ColorEditorSection(configuration: configuration)
                 InteractionEditorSection(configuration: configuration)
             case .settings:
-                PerformanceInspectorSection()
+                SettingsLink { Label("Playback and App Settings...", systemImage: "gearshape") }
                 ThemeSyncEditorSection(assets: assets, configuration: configuration)
+                Button("Reset Wallpaper to Plain Video") {
+                    appState.updateEditorConfiguration(for: asset, assets: assets, profiles: profiles, modelContext: modelContext) {
+                        $0 = .default
+                    }
+                    selectedWidgetID = nil
+                    appState.isEditModeEnabled = false
+                }
             }
         }
     }
@@ -1082,9 +1092,7 @@ private struct InspectorIconDock: View {
                     transaction.disablesAnimations = true
                     withTransaction(transaction) {
                         selection = tab
-                        if tab != .layers {
-                            selectedWidgetID = nil
-                        }
+                        selectedWidgetID = nil
                     }
                 } label: {
                     ZStack {
@@ -1111,14 +1119,15 @@ private struct InspectorIconDock: View {
     }
 }
 
-private struct PerformanceInspectorSection: View {
+struct PerformanceInspectorSection: View {
     @EnvironmentObject private var appState: AppState
 
     var body: some View {
-        EditorSectionCard(title: "Performance") {
+        VStack(alignment: .leading, spacing: 12) {
             Toggle("Pause when covered", isOn: $appState.policy.pauseWhenCovered)
             Toggle("Pause during full-screen apps", isOn: $appState.policy.pauseDuringFullscreenApps)
             Toggle("Reduce on battery", isOn: $appState.policy.reduceOnBattery)
+            Toggle("Pause when Mac is hot", isOn: $appState.policy.pauseWhenHot)
             FPSCapControl(title: "Battery FPS", fps: $appState.policy.batteryFPSCap)
             FPSCapControl(
                 title: "Normal FPS",

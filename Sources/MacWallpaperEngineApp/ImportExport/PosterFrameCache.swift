@@ -4,9 +4,13 @@ import Foundation
 
 @MainActor
 enum PosterFrameCache {
-    private static let imageCache = NSCache<NSString, NSImage>()
+    private static let imageCache: NSCache<NSString, NSImage> = {
+        let cache = NSCache<NSString, NSImage>()
+        cache.totalCostLimit = 64 * 1_024 * 1_024
+        return cache
+    }()
 
-    static func generatePoster(for url: URL, assetID: UUID) -> String? {
+    static func generatePoster(for url: URL, assetID: UUID) async -> String? {
         do {
             let directory = try posterDirectory()
             let filename = "\(assetID.uuidString).png"
@@ -17,17 +21,15 @@ enum PosterFrameCache {
             generator.appliesPreferredTrackTransform = true
             generator.maximumSize = CGSize(width: 640, height: 360)
 
-            let image = try generator.copyCGImage(
-                at: CMTime(seconds: 1, preferredTimescale: 600),
-                actualTime: nil
-            )
+            let image = try await generator.image(at: .zero).image
             let bitmap = NSBitmapImageRep(cgImage: image)
             guard let data = bitmap.representation(using: .png, properties: [:]) else {
                 return nil
             }
 
             try data.write(to: outputURL, options: .atomic)
-            imageCache.setObject(NSImage(cgImage: image, size: .zero), forKey: filename as NSString)
+            imageCache.setObject(NSImage(cgImage: image, size: .zero), forKey: filename as NSString,
+                                 cost: image.bytesPerRow * image.height)
             return filename
         } catch {
             return nil
@@ -35,23 +37,23 @@ enum PosterFrameCache {
     }
 
     static func image(for filename: String?) -> NSImage? {
-        guard let filename,
-              let directory = try? posterDirectory() else {
+        guard let filename, filename == (filename as NSString).lastPathComponent else {
             return nil
         }
 
         if let cachedImage = imageCache.object(forKey: filename as NSString) {
             return cachedImage
         }
+        guard let directory = try? posterDirectory() else { return nil }
 
         let url = directory.appendingPathComponent(filename)
         guard let image = NSImage(contentsOf: url) else { return nil }
-        imageCache.setObject(image, forKey: filename as NSString)
+        imageCache.setObject(image, forKey: filename as NSString, cost: 640 * 360 * 4)
         return image
     }
 
     static func remove(filename: String?) {
-        guard let filename,
+        guard let filename, filename == (filename as NSString).lastPathComponent,
               let directory = try? posterDirectory() else {
             return
         }
@@ -61,14 +63,7 @@ enum PosterFrameCache {
     }
 
     private static func posterDirectory() throws -> URL {
-        let baseURL = try FileManager.default.url(
-            for: .applicationSupportDirectory,
-            in: .userDomainMask,
-            appropriateFor: nil,
-            create: true
-        )
-        let directory = baseURL
-            .appendingPathComponent("MacWallpaperEngine", isDirectory: true)
+        let directory = AppStorage.root
             .appendingPathComponent("Posters", isDirectory: true)
 
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)

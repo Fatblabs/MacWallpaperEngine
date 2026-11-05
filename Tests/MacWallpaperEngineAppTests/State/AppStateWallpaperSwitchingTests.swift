@@ -4,7 +4,7 @@ import MacWallpaperEngineCore
 import SwiftData
 import Testing
 
-@Suite("Wallpaper Switching")
+@Suite("Wallpaper Switching", .serialized)
 @MainActor
 struct AppStateWallpaperSwitchingTests {
     @Test
@@ -32,7 +32,7 @@ struct AppStateWallpaperSwitchingTests {
         context.insert(secondAsset)
         try context.save()
 
-        let appState = AppState()
+        let appState = AppState(runtimeEnabled: false)
         appState.setAsset(firstAsset, for: nil, modelContext: context)
         let initialProfiles = try context.fetch(FetchDescriptor<DisplayProfileRecord>())
         #expect(initialProfiles.count == displays.count)
@@ -43,6 +43,24 @@ struct AppStateWallpaperSwitchingTests {
         #expect(switchedProfiles.count == displays.count)
         #expect(switchedProfiles.allSatisfy { $0.assignedAssetID == secondAsset.id })
         #expect(appState.statusMessage == "Set Blue")
+
+        appState.setAsset(nil, for: nil, modelContext: context)
+        #expect(switchedProfiles.allSatisfy { $0.assignedAssetID == nil })
+        let saved = try #require(WallpaperStateCache.load())
+        let configurations = WallpaperSnapshotResolver.configurations(from: saved, displays: displays, appearance: .light, minuteOfDay: 600)
+        #expect(configurations.count == displays.count)
+        #expect(configurations.allSatisfy { $0.fileURL == nil })
+        #expect(appState.statusMessage == "Restored system wallpaper")
+
+        let emptyContainer = try ModelContainer(for: WallpaperAssetRecord.self, DisplayProfileRecord.self,
+            AppSettingsRecord.self, configurations: ModelConfiguration(isStoredInMemoryOnly: true))
+        AppState(runtimeEnabled: false).bootstrapFromStore(modelContext: emptyContainer.mainContext)
+        let recoveredAssets = try emptyContainer.mainContext.fetch(FetchDescriptor<WallpaperAssetRecord>())
+        let recoveredProfiles = try emptyContainer.mainContext.fetch(FetchDescriptor<DisplayProfileRecord>())
+        #expect(Set(recoveredAssets.map(\.id)) == [firstAsset.id, secondAsset.id])
+        #expect(recoveredProfiles.count == displays.count)
+        #expect(recoveredProfiles.allSatisfy { $0.assignedAssetID == nil })
+        WallpaperStateCache.clear()
     }
 
     private func asset(displayName: String, url: URL) -> WallpaperAsset {

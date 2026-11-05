@@ -8,6 +8,45 @@ import Testing
 @Suite("SmoothVideoExporter")
 struct SmoothVideoExporterTests {
     @Test
+    func repeatedExportPreservesPreviousOutput() async throws {
+        let source = FileManager.default.temporaryDirectory.appendingPathComponent("\(UUID()).mov")
+        try await Self.writeTestMovie(to: source)
+        defer { try? FileManager.default.removeItem(at: source) }
+        let id = UUID()
+        let preset = SmoothVideoExportPreset(title: "Repeat", targetFPS: 30, interpolationMode: .duplicate)
+        let first = try await SmoothVideoExporter.exportSmoothCopy(sourceURL: source, assetID: id, sourceDisplayName: "Repeat", preset: preset)
+        defer { try? FileManager.default.removeItem(at: first) }
+        let originalData = try Data(contentsOf: first)
+        let second = try await SmoothVideoExporter.exportSmoothCopy(sourceURL: source, assetID: id, sourceDisplayName: "Repeat", preset: preset)
+        defer { try? FileManager.default.removeItem(at: second) }
+        #expect(first != second)
+        #expect(try Data(contentsOf: first) == originalData)
+    }
+
+    @Test
+    func cancellationAfterWriterStartsCleansPartialOutput() async throws {
+        let source = FileManager.default.temporaryDirectory.appendingPathComponent("\(UUID()).mov")
+        try await Self.writeTestMovie(to: source)
+        defer { try? FileManager.default.removeItem(at: source) }
+        let id = UUID()
+        let task = Task {
+            try await SmoothVideoExporter.exportSmoothCopy(sourceURL: source, assetID: id, sourceDisplayName: "Cancel",
+                preset: SmoothVideoExportPreset(title: "Cancel", targetFPS: 500, interpolationMode: .blend),
+                progress: { _ in
+                    // Cancellation at a deterministic post-writer-start suspension point.
+                    withUnsafeCurrentTask { $0?.cancel() }
+                })
+        }
+        do {
+            let output = try await task.value
+            try? FileManager.default.removeItem(at: output)
+            Issue.record("Cancelled export unexpectedly completed")
+        } catch is CancellationError {
+            let contents = try FileManager.default.contentsOfDirectory(at: SmoothVideoExporter.generatedDirectory(), includingPropertiesForKeys: nil)
+            #expect(!contents.contains { $0.lastPathComponent.contains(String(id.uuidString.prefix(8))) })
+        }
+    }
+    @Test
     func exportsGeneratedSmoothCopyThatReimportsAsLocalVideo() async throws {
         let sourceURL = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString)
@@ -98,7 +137,7 @@ struct SmoothVideoExporterTests {
         #expect(metadata.duration > 0)
     }
 
-    private static func writeTestMovie(to url: URL) async throws {
+    static func writeTestMovie(to url: URL) async throws {
         let writer = try AVAssetWriter(outputURL: url, fileType: .mov)
         let settings: [String: Any] = [
             AVVideoCodecKey: AVVideoCodecType.h264,

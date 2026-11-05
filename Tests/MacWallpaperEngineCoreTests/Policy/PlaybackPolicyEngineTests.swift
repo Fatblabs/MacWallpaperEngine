@@ -5,6 +5,19 @@ import Testing
 @Suite("PlaybackPolicyEngine")
 struct PlaybackPolicyEngineTests {
     @Test
+    func batteryCannotRaiseNormalCap() {
+        let context = PlaybackContext(displayID: 1, desktopCoverage: 0, isFullscreenAppCoveringDisplay: false,
+            powerSource: .battery, isLowPowerModeEnabled: false, thermalPressure: .nominal)
+        #expect(PlaybackPolicyEngine().mode(for: context, policy: PlaybackPolicy(batteryFPSCap: 120, normalFPSCap: 30)) == .capped(fps: 30))
+    }
+
+    @Test
+    func malformedRatesNeverOverflowOrCrash() {
+        #expect(PlaybackFrameRateCap.effectiveMaximumFPS(sourceFPS: .greatestFiniteMagnitude, playbackRate: 2, targetFPS: 60) == 60)
+        #expect(PlaybackFrameRateCap.effectiveMaximumFPS(sourceFPS: 60, playbackRate: .infinity, targetFPS: 60) == 60)
+        #expect(PlaybackFrameRateCap.effectiveMaximumFPS(sourceFPS: .nan, playbackRate: 1, targetFPS: 60) == 60)
+    }
+    @Test
     func batteryPowerCapsFrameRate() {
         let engine = PlaybackPolicyEngine()
         let context = PlaybackContext(

@@ -14,8 +14,10 @@ enum SmoothVideoExporter {
         sourceURL: URL,
         assetID: UUID,
         sourceDisplayName: String,
-        preset: SmoothVideoExportPreset
+        preset: SmoothVideoExportPreset,
+        progress: (@Sendable (Double) async -> Void)? = nil
     ) async throws -> URL {
+        try Task.checkCancellation()
         let didStartAccess = sourceURL.startAccessingSecurityScopedResource()
         defer {
             if didStartAccess {
@@ -44,9 +46,14 @@ enum SmoothVideoExporter {
             outputSize: outputSize
         )
 
-        try? FileManager.default.removeItem(at: outputURL)
-
         let writer = try AVAssetWriter(outputURL: outputURL, fileType: .mov)
+        var completed = false
+        defer {
+            if !completed {
+                writer.cancelWriting()
+                try? FileManager.default.removeItem(at: outputURL)
+            }
+        }
         let input = AVAssetWriterInput(
             mediaType: .video,
             outputSettings: outputSettings(outputSize: outputSize, targetFPS: targetFPS)
@@ -73,12 +80,12 @@ enum SmoothVideoExporter {
             throw writer.error ?? ExportError.exportFailed
         }
         writer.startSession(atSourceTime: .zero)
+        await progress?(0)
 
         let imageGenerator = AVAssetImageGenerator(asset: sourceAsset)
         imageGenerator.appliesPreferredTrackTransform = true
-        let sourceFrameDuration = CMTime(seconds: 1 / sourceFPS, preferredTimescale: 600)
-        imageGenerator.requestedTimeToleranceBefore = sourceFrameDuration
-        imageGenerator.requestedTimeToleranceAfter = sourceFrameDuration
+        imageGenerator.requestedTimeToleranceBefore = .zero
+        imageGenerator.requestedTimeToleranceAfter = .zero
 
         guard let pixelBufferPool = adaptor.pixelBufferPool else {
             throw ExportError.missingPixelBufferPool
@@ -100,15 +107,17 @@ enum SmoothVideoExporter {
             ciContext: ciContext,
             colorSpace: colorSpace
         )
-        let opticalFlowInterpolator = try? MetalOpticalFlowInterpolator(device: metalDevice)
+        let opticalFlowInterpolator = preset.interpolationMode == .opticalFlow
+            ? try? MetalOpticalFlowInterpolator(device: metalDevice) : nil
         let frameCount = max(1, Int(ceil(duration * Double(targetFPS))))
         let maxSourceFrameIndex = max(0, Int(floor(duration * sourceFPS)))
         let maxReadableTime = max(0, duration - min(1 / sourceFPS, 0.001))
         var cachedImages: [Int: CGImage] = [:]
+        var reportedPercent = -1
 
         for outputFrameIndex in 0..<frameCount {
             try Task.checkCancellation()
-            try await waitUntilReady(input)
+            try await waitUntilReady(input, writer: writer)
 
             guard writer.status == .writing else {
                 throw writer.error ?? ExportError.exportFailed
@@ -120,7 +129,7 @@ enum SmoothVideoExporter {
             let upperSourceIndex = min(lowerSourceIndex + 1, maxSourceFrameIndex)
             let blendAmount = sourcePosition - Double(lowerSourceIndex)
 
-            let baseImage = try sourceImage(
+            let baseImage = try await sourceImage(
                 frameIndex: lowerSourceIndex,
                 sourceFPS: sourceFPS,
                 maxReadableTime: maxReadableTime,
@@ -128,26 +137,26 @@ enum SmoothVideoExporter {
                 cache: &cachedImages
             )
             let baseCIImage = CIImage(cgImage: baseImage)
-            var outputImage = await upscaledImage(baseCIImage, using: metalFXUpscaler, to: outputBounds)
+            var sourceFrame = baseCIImage
 
             if preset.interpolationMode != .duplicate, blendAmount > 0.001, upperSourceIndex != lowerSourceIndex {
-                let nextImage = try sourceImage(
+                let nextImage = try await sourceImage(
                     frameIndex: upperSourceIndex,
                     sourceFPS: sourceFPS,
                     maxReadableTime: maxReadableTime,
                     imageGenerator: imageGenerator,
                     cache: &cachedImages
                 )
-                outputImage = await interpolatedImage(
+                sourceFrame = interpolatedImage(
                     from: baseImage,
                     to: nextImage,
                     amount: blendAmount,
                     mode: preset.interpolationMode,
-                    outputBounds: outputBounds,
-                    metalFXUpscaler: metalFXUpscaler,
                     opticalFlowInterpolator: opticalFlowInterpolator
                 )
             }
+            // Interpolate at source resolution, then run MetalFX once for this output frame.
+            let outputImage = await upscaledImage(sourceFrame, using: metalFXUpscaler, to: outputBounds)
 
             cachedImages = cachedImages.filter { abs($0.key - lowerSourceIndex) <= 2 }
 
@@ -161,11 +170,18 @@ enum SmoothVideoExporter {
             guard adaptor.append(pixelBuffer, withPresentationTime: presentationTime) else {
                 throw writer.error ?? ExportError.exportFailed
             }
+            let percent = (outputFrameIndex + 1) * 100 / frameCount
+            if percent != reportedPercent {
+                reportedPercent = percent
+                await progress?(Double(outputFrameIndex + 1) / Double(frameCount))
+            }
         }
 
         input.markAsFinished()
         writer.endSession(atSourceTime: CMTime(seconds: duration, preferredTimescale: 600))
         try await finishWriting(writer)
+        try Task.checkCancellation()
+        completed = true
         return outputURL
     }
 
@@ -192,14 +208,14 @@ enum SmoothVideoExporter {
         maxReadableTime: Double,
         imageGenerator: AVAssetImageGenerator,
         cache: inout [Int: CGImage]
-    ) throws -> CGImage {
+    ) async throws -> CGImage {
         if let cachedImage = cache[frameIndex] {
             return cachedImage
         }
 
         let seconds = min(Double(frameIndex) / sourceFPS, maxReadableTime)
-        let time = CMTime(seconds: seconds, preferredTimescale: 600)
-        let image = try imageGenerator.copyCGImage(at: time, actualTime: nil)
+        let time = CMTime(seconds: seconds, preferredTimescale: 60_000)
+        let image = try await imageGenerator.image(at: time).image
         cache[frameIndex] = image
         return image
     }
@@ -236,20 +252,16 @@ enum SmoothVideoExporter {
         to endImage: CGImage,
         amount: Double,
         mode: SmoothVideoInterpolationMode,
-        outputBounds: CGRect,
-        metalFXUpscaler: MetalFXFrameUpscaler?,
         opticalFlowInterpolator: MetalOpticalFlowInterpolator?
-    ) async -> CIImage {
+    ) -> CIImage {
         let startCIImage = CIImage(cgImage: startImage)
         let endCIImage = CIImage(cgImage: endImage)
 
         switch mode {
         case .duplicate:
-            return await upscaledImage(startCIImage, using: metalFXUpscaler, to: outputBounds)
+            return startCIImage
         case .blend:
-            let scaledStart = await upscaledImage(startCIImage, using: metalFXUpscaler, to: outputBounds)
-            let scaledEnd = await upscaledImage(endCIImage, using: metalFXUpscaler, to: outputBounds)
-            return blendedImage(from: scaledStart, to: scaledEnd, amount: amount)
+            return blendedImage(from: startCIImage, to: endCIImage, amount: amount)
         case .opticalFlow:
             guard let predictedImage = opticalFlowPredictedImage(
                 from: startImage,
@@ -257,14 +269,10 @@ enum SmoothVideoExporter {
                 amount: amount,
                 interpolator: opticalFlowInterpolator
             ) else {
-                let scaledStart = await upscaledImage(startCIImage, using: metalFXUpscaler, to: outputBounds)
-                let scaledEnd = await upscaledImage(endCIImage, using: metalFXUpscaler, to: outputBounds)
-                return blendedImage(from: scaledStart, to: scaledEnd, amount: amount)
+                return blendedImage(from: startCIImage, to: endCIImage, amount: amount)
             }
 
-            let scaledPredicted = await upscaledImage(predictedImage, using: metalFXUpscaler, to: outputBounds)
-            let scaledEnd = await upscaledImage(endCIImage, using: metalFXUpscaler, to: outputBounds)
-            return blendedImage(from: scaledPredicted, to: scaledEnd, amount: amount * 0.25)
+            return blendedImage(from: predictedImage, to: endCIImage, amount: amount * 0.25)
         }
     }
 
@@ -560,9 +568,10 @@ enum SmoothVideoExporter {
         return Int(min(120_000_000, max(8_000_000, pixelsPerSecond * 0.08)))
     }
 
-    private static func waitUntilReady(_ input: AVAssetWriterInput) async throws {
+    private static func waitUntilReady(_ input: AVAssetWriterInput, writer: AVAssetWriter) async throws {
         while !input.isReadyForMoreMediaData {
             try Task.checkCancellation()
+            guard writer.status == .writing else { throw writer.error ?? ExportError.exportFailed }
             try await Task.sleep(for: .milliseconds(5))
         }
     }
@@ -591,20 +600,13 @@ enum SmoothVideoExporter {
         let directory = try generatedDirectory()
         return directory
             .appendingPathComponent(
-                "\(safeName)-\(assetID.uuidString.prefix(8))-\(preset.normalizedTargetFPS)fps-\(outputSize.width)x\(outputSize.height)"
+                "\(safeName.prefix(100))-\(assetID.uuidString.prefix(8))-\(preset.normalizedTargetFPS)fps-\(outputSize.width)x\(outputSize.height)-\(UUID().uuidString)"
             )
             .appendingPathExtension("mov")
     }
 
     static func generatedDirectory() throws -> URL {
-        let baseURL = try FileManager.default.url(
-            for: .applicationSupportDirectory,
-            in: .userDomainMask,
-            appropriateFor: nil,
-            create: true
-        )
-        let directory = baseURL
-            .appendingPathComponent("MacWallpaperEngine", isDirectory: true)
+        let directory = AppStorage.root
             .appendingPathComponent("GeneratedSmoothCopies", isDirectory: true)
 
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)

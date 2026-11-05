@@ -42,7 +42,10 @@ public enum PlaybackFrameRateCap {
             return target
         }
 
-        let sourceEffectiveFPS = Int((sourceFPS * max(0.01, playbackRate)).rounded(.up))
+        guard playbackRate.isFinite else { return target }
+        let effective = sourceFPS * max(0.01, playbackRate)
+        guard effective.isFinite, effective < Double(target) else { return target }
+        let sourceEffectiveFPS = Int(effective.rounded(.up))
         return min(target, clampedTargetFPS(sourceEffectiveFPS))
     }
 }
@@ -165,7 +168,9 @@ public final class PlaybackPolicyEngine {
         }
 
         if policy.reduceOnBattery && context.powerSource == .battery {
-            return .capped(fps: PlaybackFrameRateCap.clampedTargetFPS(policy.batteryFPSCap))
+            let batteryCap = PlaybackFrameRateCap.clampedTargetFPS(policy.batteryFPSCap)
+            let normalCap = policy.normalFPSCap.map(PlaybackFrameRateCap.clampedTargetFPS) ?? batteryCap
+            return .capped(fps: min(batteryCap, normalCap))
         }
 
         if let normalFPSCap = policy.normalFPSCap {

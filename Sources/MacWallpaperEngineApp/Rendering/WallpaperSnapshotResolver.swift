@@ -10,19 +10,18 @@ enum WallpaperSnapshotResolver {
         minuteOfDay: Int
     ) -> [WallpaperDisplayConfiguration] {
         let urlsByAssetID = resolvedURLsByAssetID(from: snapshot)
-        guard !urlsByAssetID.isEmpty else { return [] }
-
-        let assetsByID = Dictionary(uniqueKeysWithValues: snapshot.assets.map { ($0.id, $0) })
+        let assetsByID = Dictionary(snapshot.assets.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         let activeAssetIDs = snapshot.activeAssetIDs.filter { urlsByAssetID[$0] != nil }
         let fallbackAssetID = activeAssetIDs.first ?? snapshot.assets.first { urlsByAssetID[$0.id] != nil }?.id
 
         return displays.compactMap { display in
             let assignment = snapshot.displayAssignments.first { $0.screenID == display.idString }
             let assignedAssetID = assignment?.assetID.flatMap { urlsByAssetID[$0] == nil ? nil : $0 }
-            guard let selectedAssetID = assignedAssetID ?? fallbackAssetID,
+            guard let selectedAssetID = (assignment == nil ? fallbackAssetID : assignedAssetID),
                   var selectedAsset = assetsByID[selectedAssetID],
                   let selectedURL = urlsByAssetID[selectedAssetID] else {
-                return nil
+                return WallpaperDisplayConfiguration(display: display, assetID: nil, fileURL: nil,
+                    assetDuration: 0, layoutMode: .fill, editorConfiguration: .default, playlistItems: [])
             }
 
             let selectedConfiguration = selectedAsset.editorConfiguration
@@ -81,10 +80,10 @@ enum WallpaperSnapshotResolver {
     }
 
     private static func resolvedURLsByAssetID(from snapshot: PersistentWallpaperSnapshot) -> [UUID: URL] {
-        Dictionary(uniqueKeysWithValues: snapshot.assets.compactMap { asset in
+        Dictionary(snapshot.assets.compactMap { asset in
             guard let url = resolvedURL(for: asset) else { return nil }
             return (asset.id, url)
-        })
+        }, uniquingKeysWith: { first, _ in first })
     }
 
     private static func resolvedURL(for asset: WallpaperAssetRestoreMetadata) -> URL? {
@@ -96,7 +95,9 @@ enum WallpaperSnapshotResolver {
                 relativeTo: nil,
                 bookmarkDataIsStale: &isStale
             ), url.isFileURL {
-                return url
+                let access = url.startAccessingSecurityScopedResource()
+                defer { if access { url.stopAccessingSecurityScopedResource() } }
+                if FileManager.default.fileExists(atPath: url.path) { return url }
             }
         }
 

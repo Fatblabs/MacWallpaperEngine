@@ -11,10 +11,8 @@ CONFIGURATION="${CONFIGURATION:-release}"
 
 swift build --package-path "$ROOT_DIR" -c "$CONFIGURATION"
 
-EXECUTABLE="$ROOT_DIR/.build/arm64-apple-macosx/$CONFIGURATION/$APP_NAME"
-if [[ ! -x "$EXECUTABLE" ]]; then
-  EXECUTABLE="$ROOT_DIR/.build/$CONFIGURATION/$APP_NAME"
-fi
+BIN_DIR="$(swift build --package-path "$ROOT_DIR" -c "$CONFIGURATION" --show-bin-path)"
+EXECUTABLE="$BIN_DIR/$APP_NAME"
 
 if [[ ! -x "$EXECUTABLE" ]]; then
   echo "Could not find built executable for $APP_NAME" >&2
@@ -57,9 +55,22 @@ cat > "$CONTENTS_DIR/Info.plist" <<'PLIST'
     <string>NSApplication</string>
     <key>NSSupportsAutomaticGraphicsSwitching</key>
     <true/>
+    <key>CFBundleDocumentTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleTypeName</key><string>Local Video</string>
+            <key>CFBundleTypeRole</key><string>Viewer</string>
+            <key>LSHandlerRank</key><string>Alternate</string>
+            <key>LSItemContentTypes</key>
+            <array><string>public.movie</string><string>public.video</string></array>
+        </dict>
+    </array>
 </dict>
 </plist>
 PLIST
+
+# Ad-hoc signing checks bundle integrity; this is not Developer ID notarization.
+codesign --force --sign - "$APP_DIR"
 
 (
   cd "$ROOT_DIR/dist"

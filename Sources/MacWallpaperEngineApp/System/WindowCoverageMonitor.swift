@@ -11,17 +11,19 @@ struct ScreenRuntimeState: Equatable {
 @MainActor
 final class WindowCoverageMonitor {
     var onUpdate: (([ScreenRuntimeState]) -> Void)?
+    var fullscreenCoverageThreshold = 0.98
 
     private var timer: Timer?
     private let ignoredPID = Int32(ProcessInfo.processInfo.processIdentifier)
 
     func start() {
-        stop()
+        guard timer == nil else { return }
         timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 self?.sample()
             }
         }
+        timer?.tolerance = 0.1
         sample()
     }
 
@@ -37,14 +39,15 @@ final class WindowCoverageMonitor {
             ScreenRuntimeState(
                 displayID: display.id,
                 desktopCoverage: CoverageCalculator.desktopCoverage(
-                    displayFrame: display.frame,
+                    displayFrame: CGDisplayBounds(display.id),
                     windows: windows,
                     ignoringOwnerPIDs: ignoredPIDs
                 ),
                 isFullscreenCovered: CoverageCalculator.hasFullscreenCover(
-                    displayFrame: display.frame,
+                    displayFrame: CGDisplayBounds(display.id),
                     windows: windows,
-                    ignoringOwnerPIDs: ignoredPIDs
+                    ignoringOwnerPIDs: ignoredPIDs,
+                    threshold: fullscreenCoverageThreshold
                 )
             )
         }

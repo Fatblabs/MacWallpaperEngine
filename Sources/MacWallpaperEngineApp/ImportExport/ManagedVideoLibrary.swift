@@ -16,6 +16,13 @@ enum ManagedVideoLibrary {
             throw LocalVideoImportError.unsupportedFileType(sourceURL.pathExtension.lowercased())
         }
 
+        let didStartAccess = sourceURL.startAccessingSecurityScopedResource()
+        defer {
+            if didStartAccess { sourceURL.stopAccessingSecurityScopedResource() }
+        }
+        guard FileManager.default.fileExists(atPath: sourceURL.path) else {
+            throw CocoaError(.fileReadNoSuchFile)
+        }
         if isManagedVideoURL(sourceURL) {
             return PreparedVideoImport(url: sourceURL, wasCopied: false)
         }
@@ -25,16 +32,12 @@ enum ManagedVideoLibrary {
             return PreparedVideoImport(url: destinationURL, wasCopied: false)
         }
 
-        let didStartAccess = sourceURL.startAccessingSecurityScopedResource()
-        defer {
-            if didStartAccess {
-                sourceURL.stopAccessingSecurityScopedResource()
-            }
-        }
-
+        let stagingURL = destinationURL.deletingLastPathComponent().appendingPathComponent(".import-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: stagingURL) }
         do {
-            try FileManager.default.copyItem(at: sourceURL, to: destinationURL)
-            try excludeFromBackup(destinationURL)
+            try FileManager.default.copyItem(at: sourceURL, to: stagingURL)
+            try excludeFromBackup(stagingURL)
+            try FileManager.default.moveItem(at: stagingURL, to: destinationURL)
         } catch CocoaError.fileWriteFileExists {
             return PreparedVideoImport(url: destinationURL, wasCopied: false)
         }
@@ -47,13 +50,13 @@ enum ManagedVideoLibrary {
             return false
         }
         let candidate = url.standardizedFileURL.resolvingSymlinksInPath()
-        let managedPath = managedRoot.path.hasSuffix("/") ? managedRoot.path : "\(managedRoot.path)/"
-        return candidate.path == managedRoot.path || candidate.path.hasPrefix(managedPath)
+        return ["ImportedVideos", "GeneratedSmoothCopies", "OptimizedSnippets"].contains { folder in
+            candidate.path.hasPrefix(managedRoot.appendingPathComponent(folder).path + "/")
+        }
     }
 
     static func managedRootDirectory() throws -> URL {
-        try applicationSupportDirectory()
-            .appendingPathComponent("MacWallpaperEngine", isDirectory: true)
+        AppStorage.root
     }
 
     static func importedVideosDirectory() throws -> URL {
@@ -95,15 +98,6 @@ enum ManagedVideoLibrary {
         let components = name.components(separatedBy: invalidCharacters)
         let sanitized = components.joined(separator: "-").trimmingCharacters(in: .whitespacesAndNewlines)
         return sanitized.isEmpty ? "wallpaper-video" : sanitized
-    }
-
-    private static func applicationSupportDirectory() throws -> URL {
-        try FileManager.default.url(
-            for: .applicationSupportDirectory,
-            in: .userDomainMask,
-            appropriateFor: nil,
-            create: true
-        )
     }
 
     private static func excludeFromBackup(_ url: URL) throws {

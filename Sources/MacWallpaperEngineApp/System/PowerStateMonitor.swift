@@ -9,11 +9,24 @@ final class PowerStateMonitor {
     private(set) var powerSource: PowerSourceState = .unknown
     private(set) var isLowPowerModeEnabled: Bool = false
     private(set) var thermalPressure: ThermalPressure = .nominal
+    private var observers: [NSObjectProtocol] = []
+    private var powerSourceNotification: CFRunLoopSource?
 
     func start() {
+        guard observers.isEmpty else { return }
         refresh()
 
-        NotificationCenter.default.addObserver(
+        let context = Unmanaged.passUnretained(self).toOpaque()
+        powerSourceNotification = IOPSNotificationCreateRunLoopSource({ context in
+            guard let context else { return }
+            let monitor = Unmanaged<PowerStateMonitor>.fromOpaque(context).takeUnretainedValue()
+            Task { @MainActor [weak monitor] in monitor?.refresh() }
+        }, context)?.takeRetainedValue()
+        if let powerSourceNotification {
+            CFRunLoopAddSource(CFRunLoopGetMain(), powerSourceNotification, .commonModes)
+        }
+
+        observers.append(NotificationCenter.default.addObserver(
             forName: Notification.Name.NSProcessInfoPowerStateDidChange,
             object: nil,
             queue: .main
@@ -21,10 +34,10 @@ final class PowerStateMonitor {
             Task { @MainActor in
                 self?.refresh()
             }
-        }
+        })
 
         _ = ProcessInfo.processInfo.thermalState
-        NotificationCenter.default.addObserver(
+        observers.append(NotificationCenter.default.addObserver(
             forName: ProcessInfo.thermalStateDidChangeNotification,
             object: nil,
             queue: .main
@@ -32,7 +45,14 @@ final class PowerStateMonitor {
             Task { @MainActor in
                 self?.refresh()
             }
-        }
+        })
+    }
+
+    func stop() {
+        observers.forEach { NotificationCenter.default.removeObserver($0) }
+        observers.removeAll()
+        if let powerSourceNotification { CFRunLoopSourceInvalidate(powerSourceNotification) }
+        powerSourceNotification = nil
     }
 
     func refresh() {

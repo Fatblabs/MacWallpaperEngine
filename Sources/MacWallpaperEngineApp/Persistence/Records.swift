@@ -67,7 +67,13 @@ final class WallpaperAssetRecord {
                 relativeTo: nil,
                 bookmarkDataIsStale: &isStale
             )
-            if url.isFileURL {
+            let hasAccess = url.startAccessingSecurityScopedResource()
+            defer { if hasAccess { url.stopAccessingSecurityScopedResource() } }
+            if url.isFileURL, FileManager.default.fileExists(atPath: url.path) {
+                if isStale, let refreshed = try? url.bookmarkData(options: .withSecurityScope,
+                                                                includingResourceValuesForKeys: nil, relativeTo: nil) {
+                    bookmarkData = refreshed
+                }
                 return url
             }
         } catch {
@@ -81,7 +87,7 @@ final class WallpaperAssetRecord {
             return fallbackURL
         }
 
-        return URL(fileURLWithPath: lastKnownPath)
+        throw CocoaError(.fileReadNoSuchFile, userInfo: [NSFilePathErrorKey: lastKnownPath])
     }
 
     private var lastKnownFileURL: URL? {

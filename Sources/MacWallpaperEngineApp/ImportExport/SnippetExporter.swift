@@ -3,6 +3,7 @@ import Foundation
 import MacWallpaperEngineCore
 
 enum SnippetExporter {
+    @MainActor
     static func exportOptimizedSnippet(
         sourceURL: URL,
         assetID: UUID,
@@ -10,6 +11,9 @@ enum SnippetExporter {
         duration: Double,
         trim: VideoTrimConfiguration
     ) async throws -> URL {
+        try Task.checkCancellation()
+        let hasAccess = sourceURL.startAccessingSecurityScopedResource()
+        defer { if hasAccess { sourceURL.stopAccessingSecurityScopedResource() } }
         let snippet = trim.performanceSnippet(forDuration: duration)
         let start = CMTime(seconds: snippet.startSeconds, preferredTimescale: 600)
         let end = CMTime(seconds: snippet.effectiveEndSeconds(forDuration: duration), preferredTimescale: 600)
@@ -20,10 +24,11 @@ enum SnippetExporter {
             .replacingOccurrences(of: "/", with: "-")
             .replacingOccurrences(of: ":", with: "-")
         let outputURL = directory
-            .appendingPathComponent("\(safeName)-\(assetID.uuidString.prefix(8))-optimized")
+            .appendingPathComponent("\(safeName.prefix(100))-\(assetID.uuidString.prefix(8))-optimized-\(UUID().uuidString)")
             .appendingPathExtension("mov")
 
-        try? FileManager.default.removeItem(at: outputURL)
+        var completed = false
+        defer { if !completed { try? FileManager.default.removeItem(at: outputURL) } }
 
         let sourceAsset = AVURLAsset(url: sourceURL)
         let composition = AVMutableComposition()
@@ -57,10 +62,17 @@ enum SnippetExporter {
         exportSession.outputURL = outputURL
         exportSession.outputFileType = .mov
         exportSession.shouldOptimizeForNetworkUse = false
-        await exportSession.export()
+        let cancellation = ExportCancellation(session: exportSession)
+        await withTaskCancellationHandler {
+            await exportSession.export()
+        } onCancel: {
+            Task { @MainActor in cancellation.cancel() }
+        }
+        try Task.checkCancellation()
 
         switch exportSession.status {
         case .completed:
+            completed = true
             return outputURL
         case .failed, .cancelled:
             throw exportSession.error ?? ExportError.exportFailed
@@ -69,15 +81,15 @@ enum SnippetExporter {
         }
     }
 
+    @MainActor
+    private final class ExportCancellation {
+        let session: AVAssetExportSession
+        init(session: AVAssetExportSession) { self.session = session }
+        func cancel() { session.cancelExport() }
+    }
+
     private static func optimizedDirectory() throws -> URL {
-        let baseURL = try FileManager.default.url(
-            for: .applicationSupportDirectory,
-            in: .userDomainMask,
-            appropriateFor: nil,
-            create: true
-        )
-        let directory = baseURL
-            .appendingPathComponent("MacWallpaperEngine", isDirectory: true)
+        let directory = AppStorage.root
             .appendingPathComponent("OptimizedSnippets", isDirectory: true)
 
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)

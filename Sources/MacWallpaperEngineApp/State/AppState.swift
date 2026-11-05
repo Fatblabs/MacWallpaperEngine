@@ -28,7 +28,12 @@ final class AppState: ObservableObject {
         }
     }
     @Published var launchAtLoginEnabled: Bool = LaunchAtLoginController.isEnabled
-    @Published var isExportingSmoothCopy = false
+    @Published var exportStatus: String?
+    private var exportTask: Task<Void, Never>?
+    private let runtimeEnabled: Bool
+    private var observers: [(NotificationCenter, NSObjectProtocol)] = []
+    private var editorSaveTask: Task<Void, Never>?
+    private var pendingEditorSave: (() -> Void)?
 
     let wallpaperCoordinator = WallpaperCoordinator()
 
@@ -46,14 +51,15 @@ final class AppState: ObservableObject {
     private let policyDefaultsKey = "MacWallpaperEngine.playbackPolicy"
     private let widgetDefaultsKey = "MacWallpaperEngine.widgetConfiguration"
 
-    init() {
+    init(runtimeEnabled: Bool = true) {
+        self.runtimeEnabled = runtimeEnabled
         restoredSnapshot = WallpaperStateCache.load()
         loadPolicy()
         loadWidgetConfiguration()
     }
 
     func start() {
-        guard !didStart else { return }
+        guard runtimeEnabled, !didStart else { return }
         didStart = true
 
         wallpaperCoordinator.prepareForImmediateDisplay()
@@ -77,42 +83,42 @@ final class AppState: ObservableObject {
                 self.evaluatePlaybackPolicy()
             }
         }
-        coverageMonitor.start()
 
-        NotificationCenter.default.addObserver(
+        observe(NSWorkspace.shared.notificationCenter,
             forName: NSWorkspace.screensDidSleepNotification,
             object: nil,
             queue: .main
         ) { [weak self] _ in
             Task { @MainActor in
                 self?.isScreenSleeping = true
+                self?.coverageMonitor.stop()
                 self?.evaluatePlaybackPolicy()
             }
         }
 
-        NotificationCenter.default.addObserver(
+        observe(NSWorkspace.shared.notificationCenter,
             forName: NSWorkspace.screensDidWakeNotification,
             object: nil,
             queue: .main
         ) { [weak self] _ in
             Task { @MainActor in
                 self?.isScreenSleeping = false
+                if self?.wallpaperCoordinator.activeDisplayIDs.isEmpty == false { self?.coverageMonitor.start() }
                 self?.evaluatePlaybackPolicy()
             }
         }
 
-        NotificationCenter.default.addObserver(
+        observe(NotificationCenter.default,
             forName: NSApplication.didChangeScreenParametersNotification,
             object: nil,
             queue: .main
         ) { [weak self] _ in
             Task { @MainActor in
-                self?.wallpaperCoordinator.start()
-                self?.evaluatePlaybackPolicy()
+                self?.reconcileLatestConfiguration()
             }
         }
 
-        DistributedNotificationCenter.default.addObserver(
+        observe(DistributedNotificationCenter.default,
             forName: Notification.Name("AppleInterfaceThemeChangedNotification"),
             object: nil,
             queue: .main
@@ -123,20 +129,63 @@ final class AppState: ObservableObject {
         }
     }
 
+    private func observe(_ center: NotificationCenter, forName name: Notification.Name, object: Any?,
+                         queue: OperationQueue?, using block: @escaping @Sendable (Notification) -> Void) {
+        observers.append((center, center.addObserver(forName: name, object: object, queue: queue, using: block)))
+    }
+
+    func stop() {
+        editorSaveTask?.cancel()
+        pendingEditorSave?()
+        pendingEditorSave = nil
+        exportTask?.cancel()
+        scheduleTimer?.invalidate()
+        scheduleTimer = nil
+        coverageMonitor.stop()
+        powerMonitor.stop()
+        observers.forEach { $0.0.removeObserver($0.1) }
+        observers.removeAll()
+        wallpaperCoordinator.stop()
+        didStart = false
+    }
+
     func bootstrapFromStore(modelContext: ModelContext) {
         start()
 
         do {
-            let (storedAssets, storedProfiles) = try storedConfiguration(from: modelContext)
+            var (storedAssets, storedProfiles) = try storedConfiguration(from: modelContext)
 
             if !storedAssets.isEmpty {
                 didObserveStoredAssetSnapshot = true
             } else if shouldPreserveRestoredSnapshot {
-                if applyRestoredSnapshotIfAvailable(status: "Restoring saved wallpaper...") {
-                    return
+                // Restore editable records too; a wallpaper-only fallback leaves an empty library.
+                if let restoredSnapshot {
+                    var seenIDs: Set<UUID> = []
+                    for saved in restoredSnapshot.assets where seenIDs.insert(saved.id).inserted {
+                        let record = WallpaperAssetRecord(asset: WallpaperAsset(
+                            id: saved.id, displayName: saved.displayName, originalFilename: saved.originalFilename,
+                            bookmarkData: saved.bookmarkData ?? Data(), duration: saved.duration,
+                            pixelWidth: saved.pixelWidth, pixelHeight: saved.pixelHeight,
+                            codecSummary: saved.codecSummary, lastKnownPath: saved.lastKnownPath,
+                            posterFrameFilename: saved.posterFrameFilename
+                        ))
+                        record.editorConfigurationData = saved.editorConfigurationData
+                        modelContext.insert(record)
+                    }
+                    for saved in restoredSnapshot.displayAssignments {
+                        if let existing = storedProfiles.first(where: { $0.screenID == saved.screenID }) {
+                            existing.assignedAssetID = saved.assetID
+                        } else {
+                            let profile = DisplayProfileRecord(screenID: saved.screenID, assignedAssetID: saved.assetID,
+                                layoutMode: WallpaperLayoutMode(rawValue: saved.layoutModeRawValue) ?? .fill)
+                            modelContext.insert(profile)
+                            storedProfiles.append(profile)
+                        }
+                    }
+                    try modelContext.save()
+                    (storedAssets, storedProfiles) = try storedConfiguration(from: modelContext)
+                    didObserveStoredAssetSnapshot = true
                 }
-                statusMessage = "Saved wallpaper could not be restored"
-                return
             }
 
             reconcile(assets: storedAssets, profiles: storedProfiles)
@@ -194,6 +243,7 @@ final class AppState: ObservableObject {
                     playlistItems: playlistItems
                 )
             } catch {
+                lastErrorMessage = "\(asset.displayName) is unavailable. Reveal or remove it from the library, then import a replacement."
                 return WallpaperDisplayConfiguration(
                     display: display,
                     assetID: asset.id,
@@ -206,7 +256,14 @@ final class AppState: ObservableObject {
             }
         }
 
-        wallpaperCoordinator.apply(configurations: configurations)
+        if runtimeEnabled {
+            wallpaperCoordinator.apply(configurations: configurations)
+            if configurations.contains(where: { $0.fileURL != nil }), !isScreenSleeping {
+                coverageMonitor.start()
+            } else {
+                coverageMonitor.stop()
+            }
+        }
         evaluatePlaybackPolicy()
     }
 
@@ -284,8 +341,9 @@ final class AppState: ObservableObject {
         panel.canChooseFiles = true
         panel.allowedContentTypes = [.movie, .quickTimeMovie, .mpeg4Movie, .video]
 
-        if panel.runModal() == .OK, let url = panel.url {
-            importVideo(url, modelContext: modelContext)
+        panel.begin { [weak self] response in
+            guard response == .OK, let url = panel.url else { return }
+            self?.importVideo(url, modelContext: modelContext)
         }
     }
 
@@ -318,7 +376,16 @@ final class AppState: ObservableObject {
             codecSummary: metadata.codecSummary,
             lastKnownPath: metadata.lastKnownPath
         )
-        asset.posterFrameFilename = PosterFrameCache.generatePoster(for: preparedImport.url, assetID: asset.id)
+        asset.posterFrameFilename = await PosterFrameCache.generatePoster(for: preparedImport.url, assetID: asset.id)
+        let existingAssets = try modelContext.fetch(FetchDescriptor<WallpaperAssetRecord>())
+        if let existing = existingAssets.first(where: {
+            URL(fileURLWithPath: $0.lastKnownPath).standardizedFileURL.resolvingSymlinksInPath() ==
+                preparedImport.url.standardizedFileURL.resolvingSymlinksInPath()
+        }) {
+            PosterFrameCache.remove(filename: asset.posterFrameFilename)
+            setAsset(existing, for: nil, modelContext: modelContext)
+            return
+        }
         let record = WallpaperAssetRecord(asset: asset)
         modelContext.insert(record)
 
@@ -350,7 +417,8 @@ final class AppState: ObservableObject {
         lastErrorMessage = nil
     }
 
-    func setAsset(_ asset: WallpaperAssetRecord, for display: WallpaperDisplay?, modelContext: ModelContext) {
+    func setAsset(_ asset: WallpaperAssetRecord?, for display: WallpaperDisplay?, modelContext: ModelContext) {
+        flushEditorChanges()
         do {
             let targetDisplays = display.map { [$0] } ?? WallpaperDisplay.displays()
 
@@ -362,13 +430,13 @@ final class AppState: ObservableObject {
                 let existing = try modelContext.fetch(descriptor).first
 
                 if let existing {
-                    existing.assignedAssetID = asset.id
+                    existing.assignedAssetID = asset?.id
                     existing.updatedAt = Date()
                 } else {
                     modelContext.insert(
                         DisplayProfileRecord(
                             screenID: targetDisplay.idString,
-                            assignedAssetID: asset.id,
+                            assignedAssetID: asset?.id,
                             layoutMode: .fill
                         )
                     )
@@ -377,7 +445,7 @@ final class AppState: ObservableObject {
 
             try modelContext.save()
             try reconcileFromStore(modelContext: modelContext)
-            statusMessage = "Set \(asset.displayName)"
+            statusMessage = asset.map { "Set \($0.displayName)" } ?? "Restored system wallpaper"
         } catch {
             lastErrorMessage = error.localizedDescription
         }
@@ -389,6 +457,7 @@ final class AppState: ObservableObject {
         profiles: [DisplayProfileRecord],
         modelContext: ModelContext
     ) {
+        flushEditorChanges()
         let removedAssetID = asset.id
         let removedDisplayName = asset.displayName
         let removedPosterFrameFilename = asset.posterFrameFilename
@@ -468,15 +537,33 @@ final class AppState: ObservableObject {
     ) {
         var configuration = asset.editorConfiguration
         mutate(&configuration)
+        guard configuration != asset.editorConfiguration else { return }
         asset.editorConfiguration = configuration
 
-        do {
-            try modelContext.save()
-            reconcile(assets: assets, profiles: profiles)
-            lastErrorMessage = nil
-        } catch {
-            lastErrorMessage = "Editor change could not be saved: \(error.localizedDescription)"
+        editorSaveTask?.cancel()
+        pendingEditorSave = { [weak self] in
+            guard let self else { return }
+            do {
+                try modelContext.save()
+                self.reconcile(assets: assets, profiles: profiles)
+                self.lastErrorMessage = nil
+            } catch {
+                self.lastErrorMessage = "Editor change could not be saved: \(error.localizedDescription)"
+            }
         }
+        editorSaveTask = Task { [weak self] in
+            do { try await Task.sleep(for: .milliseconds(100)) } catch { return }
+            self?.pendingEditorSave?()
+            self?.pendingEditorSave = nil
+            self?.editorSaveTask = nil
+        }
+    }
+
+    private func flushEditorChanges() {
+        editorSaveTask?.cancel()
+        editorSaveTask = nil
+        pendingEditorSave?()
+        pendingEditorSave = nil
     }
 
     func exportOptimizedSnippet(
@@ -485,7 +572,10 @@ final class AppState: ObservableObject {
         profiles: [DisplayProfileRecord],
         modelContext: ModelContext
     ) {
-        Task {
+        guard exportTask == nil else { return }
+        exportStatus = "Exporting optimized snippet..."
+        exportTask = Task {
+            defer { exportTask = nil; exportStatus = nil }
             do {
                 let sourceURL = try asset.resolvedURL()
                 let configuration = asset.editorConfiguration
@@ -508,7 +598,7 @@ final class AppState: ObservableObject {
                     codecSummary: metadata.codecSummary,
                     lastKnownPath: metadata.lastKnownPath
                 )
-                newAsset.posterFrameFilename = PosterFrameCache.generatePoster(for: outputURL, assetID: newAsset.id)
+                newAsset.posterFrameFilename = await PosterFrameCache.generatePoster(for: outputURL, assetID: newAsset.id)
                 let record = WallpaperAssetRecord(asset: newAsset)
                 modelContext.insert(record)
 
@@ -516,6 +606,8 @@ final class AppState: ObservableObject {
                 try reconcileFromStore(modelContext: modelContext)
                 statusMessage = "Exported optimized snippet"
                 lastErrorMessage = nil
+            } catch is CancellationError {
+                statusMessage = "Export cancelled"
             } catch {
                 lastErrorMessage = "Snippet export failed: \(error.localizedDescription)"
             }
@@ -527,29 +619,32 @@ final class AppState: ObservableObject {
         preset: SmoothVideoExportPreset,
         modelContext: ModelContext
     ) {
-        guard !isExportingSmoothCopy else { return }
+        guard exportTask == nil else { return }
 
         do {
             let sourceURL = try asset.resolvedURL()
             let assetID = asset.id
             let sourceDisplayName = asset.displayName
             let exportLabel = preset.exportLabel
-            isExportingSmoothCopy = true
             statusMessage = "Generating \(exportLabel) smooth copy..."
+            exportStatus = statusMessage
             lastErrorMessage = nil
 
-            Task {
-                defer { isExportingSmoothCopy = false }
+            exportTask = Task {
+                defer { exportTask = nil; exportStatus = nil }
 
                 do {
-                    let outputURL = try await Task.detached(priority: .utility) {
-                        try await SmoothVideoExporter.exportSmoothCopy(
+                    let outputURL = try await SmoothVideoExporter.exportSmoothCopy(
                             sourceURL: sourceURL,
                             assetID: assetID,
                             sourceDisplayName: sourceDisplayName,
-                            preset: preset
-                        )
-                    }.value
+                            preset: preset,
+                            progress: { [weak self] fraction in
+                                await MainActor.run {
+                                    self?.exportStatus = "Generating \(exportLabel): \(Int(fraction * 100))%"
+                                }
+                            }
+                    )
 
                     let metadata = try await LocalVideoImporter.metadata(for: outputURL)
                     var newAsset = WallpaperAsset(
@@ -562,13 +657,15 @@ final class AppState: ObservableObject {
                         codecSummary: metadata.codecSummary,
                         lastKnownPath: metadata.lastKnownPath
                     )
-                    newAsset.posterFrameFilename = PosterFrameCache.generatePoster(for: outputURL, assetID: newAsset.id)
+                    newAsset.posterFrameFilename = await PosterFrameCache.generatePoster(for: outputURL, assetID: newAsset.id)
                     modelContext.insert(WallpaperAssetRecord(asset: newAsset))
 
                     try modelContext.save()
                     try reconcileFromStore(modelContext: modelContext)
                     statusMessage = "Generated \(exportLabel) smooth copy"
                     lastErrorMessage = nil
+                } catch is CancellationError {
+                    statusMessage = "Export cancelled"
                 } catch {
                     lastErrorMessage = "Smooth copy failed: \(error.localizedDescription)"
                 }
@@ -578,13 +675,19 @@ final class AppState: ObservableObject {
         }
     }
 
+    func cancelExport() {
+        exportTask?.cancel()
+        exportStatus = "Cancelling export..."
+    }
+
     private func assetForDisplay(
         _ display: WallpaperDisplay,
         profile: DisplayProfileRecord?,
         assets: [WallpaperAssetRecord]
     ) -> WallpaperAssetRecord? {
-        if let assignedAssetID = profile?.assignedAssetID,
-           let assigned = assets.first(where: { $0.id == assignedAssetID }) {
+        if let profile {
+            guard let assignedAssetID = profile.assignedAssetID,
+                  let assigned = assets.first(where: { $0.id == assignedAssetID }) else { return nil }
             return resolvedVariant(for: assigned, assets: assets)
         }
 
@@ -632,7 +735,7 @@ final class AppState: ObservableObject {
     }
 
     private func currentWallpaperAppearance() -> WallpaperAppearance {
-        let match = NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua])
+        let match = NSApp?.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua])
         return match == .darkAqua ? .dark : .light
     }
 
@@ -642,6 +745,7 @@ final class AppState: ObservableObject {
     }
 
     private func evaluatePlaybackPolicy() {
+        coverageMonitor.fullscreenCoverageThreshold = policy.fullscreenCoverageThreshold
         let displayIDs = wallpaperCoordinator.activeDisplayIDs
         guard !displayIDs.isEmpty else { return }
 
@@ -688,6 +792,7 @@ final class AppState: ObservableObject {
             }
         }
 
+        if case .capped(let a) = lhs, case .capped(let b) = rhs { return .capped(fps: min(a, b)) }
         return rank(rhs) > rank(lhs) ? rhs : lhs
     }
 
@@ -705,7 +810,7 @@ final class AppState: ObservableObject {
     }
 
     private func loadPolicy() {
-        guard let data = UserDefaults.standard.data(forKey: policyDefaultsKey),
+        guard let data = AppStorage.defaults.data(forKey: policyDefaultsKey),
               let decoded = try? JSONDecoder().decode(PlaybackPolicy.self, from: data) else {
             return
         }
@@ -714,11 +819,11 @@ final class AppState: ObservableObject {
 
     private func savePolicy() {
         guard let data = try? JSONEncoder().encode(policy) else { return }
-        UserDefaults.standard.set(data, forKey: policyDefaultsKey)
+        AppStorage.defaults.set(data, forKey: policyDefaultsKey)
     }
 
     private func loadWidgetConfiguration() {
-        guard let data = UserDefaults.standard.data(forKey: widgetDefaultsKey),
+        guard let data = AppStorage.defaults.data(forKey: widgetDefaultsKey),
               let decoded = try? JSONDecoder().decode(WidgetOverlayConfiguration.self, from: data) else {
             return
         }
@@ -727,6 +832,6 @@ final class AppState: ObservableObject {
 
     private func saveWidgetConfiguration() {
         guard let data = try? JSONEncoder().encode(widgetConfiguration) else { return }
-        UserDefaults.standard.set(data, forKey: widgetDefaultsKey)
+        AppStorage.defaults.set(data, forKey: widgetDefaultsKey)
     }
 }
